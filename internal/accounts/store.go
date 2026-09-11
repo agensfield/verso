@@ -23,6 +23,9 @@ var (
 	ErrActiveAccount    = errors.New("cannot remove the active account")
 	ErrIdentityMismatch = errors.New("credential identity does not match account")
 	ErrInvalidSchema    = errors.New("unsupported account schema")
+	ErrInvalidAlias     = errors.New("invalid account alias")
+	ErrAliasConflict    = errors.New("account alias conflicts with existing lookup")
+	ErrReadOnly         = errors.New("account store is read-only")
 )
 
 // Account contains list-safe account metadata. It intentionally has no
@@ -45,7 +48,8 @@ type ActiveIdentity struct {
 }
 
 type Store struct {
-	root string
+	root     string
+	readOnly bool
 }
 
 type envelope struct {
@@ -81,8 +85,31 @@ func Open(root string) (*Store, error) {
 	return &Store{root: clean}, nil
 }
 
+// OpenReadOnly opens an existing store without changing its directory or file
+// permissions. A missing store is represented as empty and is not created.
+func OpenReadOnly(root string) (*Store, error) {
+	clean, err := cleanRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(clean)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &Store{root: clean, readOnly: true}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect account store: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return nil, ErrUnsafePath
+	}
+	return &Store{root: clean, readOnly: true}, nil
+}
+
 func (s *Store) List() ([]Account, error) {
 	entries, err := os.ReadDir(s.root)
+	if s.readOnly && errors.Is(err, fs.ErrNotExist) {
+		return []Account{}, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list accounts: %w", err)
 	}
@@ -144,6 +171,9 @@ func (s *Store) Find(query string) (Account, error) {
 }
 
 func (s *Store) Save(auth NativeAuth, alias string) (Account, error) {
+	if s.readOnly {
+		return Account{}, ErrReadOnly
+	}
 	if err := validateNativeAuth(auth); err != nil {
 		return Account{}, err
 	}
@@ -161,16 +191,24 @@ func (s *Store) Save(auth NativeAuth, alias string) (Account, error) {
 		}
 	}
 
+	explicitAlias := strings.TrimSpace(alias)
+	alias = explicitAlias
+	if explicitAlias == "" {
+		alias = auth.Email
+	}
+	if invalidAlias(alias) {
+		return Account{}, ErrInvalidAlias
+	}
+	if explicitAlias != "" {
+		for _, account := range accounts {
+			if account.Alias == explicitAlias || account.Email == explicitAlias {
+				return Account{}, ErrAliasConflict
+			}
+		}
+	}
 	id, err := s.unusedID()
 	if err != nil {
 		return Account{}, err
-	}
-	alias = strings.TrimSpace(alias)
-	if alias == "" {
-		alias = auth.Email
-	}
-	if alias != "" && unsafeQuery(alias) {
-		return Account{}, ErrUnsafePath
 	}
 	account := Account{ID: id, Alias: alias, Email: auth.Email, UserID: auth.UserID, AccountID: auth.AccountID}
 	if err := s.write(envelope{SchemaVersion: SchemaVersion, Account: account, Credentials: auth.raw}); err != nil {
@@ -192,6 +230,9 @@ func (s *Store) Credentials(query string) ([]byte, error) {
 }
 
 func (s *Store) UpdateCredentials(query string, auth NativeAuth) (Account, error) {
+	if s.readOnly {
+		return Account{}, ErrReadOnly
+	}
 	if err := validateNativeAuth(auth); err != nil {
 		return Account{}, err
 	}
@@ -210,6 +251,9 @@ func (s *Store) UpdateCredentials(query string, auth NativeAuth) (Account, error
 }
 
 func (s *Store) Remove(query string, active ActiveIdentity) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	account, err := s.Find(query)
 	if err != nil {
 		return err
@@ -259,6 +303,9 @@ func (s *Store) load(id string) (envelope, error) {
 	}
 	if env.Account.ID != id || !validUUID(env.Account.ID) {
 		return envelope{}, fmt.Errorf("%w: account ID does not match filename", ErrUnsafePath)
+	}
+	if invalidAlias(env.Account.Alias) {
+		return envelope{}, ErrInvalidAlias
 	}
 	if strings.TrimSpace(env.Account.UserID) == "" || strings.TrimSpace(env.Account.AccountID) == "" || !json.Valid(env.Credentials) {
 		return envelope{}, errors.New("invalid account envelope")
@@ -383,6 +430,10 @@ func cleanRoot(root string) (string, error) {
 
 func unsafeQuery(query string) bool {
 	return query == "" || query == "." || query == ".." || strings.ContainsAny(query, `/\\`)
+}
+
+func invalidAlias(alias string) bool {
+	return alias != "" && (alias != strings.TrimSpace(alias) || unsafeQuery(alias) || validUUID(alias))
 }
 
 func (s *Store) accountPath(id string) string { return filepath.Join(s.root, id+".json") }

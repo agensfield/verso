@@ -47,6 +47,11 @@ func TestParseNativeAuthRejectsUnsupportedAndUncertainIdentity(t *testing.T) {
 		{"missing account", authFixture(t, "user", "", "x@example.com", "access", nil), ErrNativeIdentity},
 		{"non native mode", []byte(`{"auth_mode":"headers","tokens":{}}`), ErrUnsupportedAuth},
 	}
+	mode := "untrusted-secret-auth-mode"
+	_, err := ParseNativeAuth([]byte(`{"auth_mode":"` + mode + `","tokens":{}}`))
+	if !errors.Is(err, ErrUnsupportedAuth) || strings.Contains(err.Error(), mode) {
+		t.Fatalf("unsupported mode error exposed raw value: %v", err)
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := ParseNativeAuth(test.raw)
@@ -165,6 +170,83 @@ func TestEmailDoesNotDeduplicateAndLookupRejectsAmbiguity(t *testing.T) {
 			t.Fatalf("query %q: got %v, want unsafe path", query, err)
 		}
 	}
+}
+
+func TestSaveRejectsLookupCollidingExplicitAliases(t *testing.T) {
+	store := mustOpen(t)
+	first, err := store.Save(mustParse(t, authFixture(t, "user-one", "workspace", "one@example.com", "one", nil)), "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range []string{first.ID, "first", "one@example.com"} {
+		_, err := store.Save(mustParse(t, authFixture(t, "user-"+alias, "workspace", "two@example.com", "two", nil)), alias)
+		want := ErrAliasConflict
+		if alias == first.ID {
+			want = ErrInvalidAlias
+		}
+		if !errors.Is(err, want) {
+			t.Fatalf("alias %q: got %v, want %v", alias, err, want)
+		}
+	}
+	listed, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("rejected aliases created accounts: %#v", listed)
+	}
+}
+
+func TestOpenReadOnlyDoesNotMutateFilesystem(t *testing.T) {
+	base := t.TempDir()
+	missing := filepath.Join(base, "missing", "accounts")
+	store, err := OpenReadOnly(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.List()
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("missing read-only store list = %#v, %v", listed, err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only open created filesystem state: %v", err)
+	}
+	auth := mustParse(t, authFixture(t, "user", "workspace", "x@example.com", "secret", nil))
+	if _, err := store.Save(auth, "x"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("read-only Save returned %v", err)
+	}
+	if _, err := store.UpdateCredentials("x", auth); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("read-only UpdateCredentials returned %v", err)
+	}
+	if err := store.Remove("x", ActiveIdentity{Known: true}); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("read-only Remove returned %v", err)
+	}
+
+	existing := filepath.Join(base, "existing")
+	if err := os.Mkdir(existing, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenReadOnly(existing); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Mode() != after.Mode() {
+		t.Fatalf("read-only open changed mode from %v to %v", before.Mode(), after.Mode())
+	}
+	if err := os.Chmod(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenReadOnly(existing); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("insecure read-only root returned %v", err)
+	}
+	assertMode(t, existing, 0o755)
 }
 
 func TestUpdateCredentialsRequiresSameNativeIdentity(t *testing.T) {

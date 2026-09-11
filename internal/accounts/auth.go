@@ -79,7 +79,7 @@ func ParseNativeAuth(raw []byte) (NativeAuth, error) {
 		return NativeAuth{}, ErrAPIKeyAuth
 	}
 	if mode != "" && mode != "chatgpt" {
-		return NativeAuth{}, fmt.Errorf("%w: %s", ErrUnsupportedAuth, mode)
+		return NativeAuth{}, ErrUnsupportedAuth
 	}
 	if len(doc.Tokens) == 0 || bytes.Equal(bytes.TrimSpace(doc.Tokens), []byte("null")) {
 		return NativeAuth{}, errors.New("native ChatGPT token data is missing")

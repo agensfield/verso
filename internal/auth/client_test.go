@@ -141,6 +141,41 @@ func TestDeviceLoginExpiryAndCancellation(t *testing.T) {
 	})
 }
 
+func TestDeviceLoginClassifiesExplicitTerminalErrorsBeforePendingStatus(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		code string
+		want error
+	}{
+		{"expired", "expired_token", ErrDeviceExpired},
+		{"denied", "access_denied", ErrDeviceDenied},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/usercode") {
+					writeJSON(t, w, http.StatusOK, map[string]any{
+						"device_auth_id": "device", "user_code": "code", "interval": "1",
+					})
+					return
+				}
+				writeJSON(t, w, http.StatusForbidden, map[string]any{
+					"error": map[string]any{"code": test.code, "message": "code must not leak"},
+				})
+			}))
+			defer server.Close()
+			slept := false
+			client := NewClient(Config{
+				IssuerURL: server.URL,
+				Sleep:     func(context.Context, time.Duration) error { slept = true; return nil },
+			})
+			_, err := client.DeviceLogin(context.Background(), func(DevicePrompt) error { return nil })
+			if !errors.Is(err, test.want) || slept {
+				t.Fatalf("error = %v, slept = %v", err, slept)
+			}
+		})
+	}
+}
+
 func TestRefreshPreservesOpaqueAndOmittedFields(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 30, 0, 123, time.UTC)
 	raw := testAuth(t, "user-1", "account-1", map[string]any{
@@ -232,6 +267,30 @@ func TestRefreshRejectsLoginRequiredAndIdentityMismatchWithoutLeaking(t *testing
 				t.Fatalf("error leaked credential: %v", err)
 			}
 		})
+	}
+}
+
+func TestRefreshRejectsEmptySuccess(t *testing.T) {
+	raw := testAuth(t, "user-1", "account-1", map[string]any{"refresh_token": "refresh-secret"}, nil)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{})
+	}))
+	defer server.Close()
+	updated, err := NewClient(Config{IssuerURL: server.URL}).Refresh(context.Background(), raw)
+	if err == nil || updated != nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("updated = %s, error = %v", updated, err)
+	}
+}
+
+func TestRefreshAndUsageRejectNonChatGPTAuthMode(t *testing.T) {
+	raw := testAuth(t, "user-1", "account-1", map[string]any{"refresh_token": "refresh-secret"},
+		map[string]any{"auth_mode": "apikey", "OPENAI_API_KEY": "api-secret"})
+	client := NewClient(Config{})
+	if _, err := client.Refresh(context.Background(), raw); !errors.Is(err, ErrInvalidAuth) {
+		t.Fatalf("refresh error = %v", err)
+	}
+	if _, err := client.Usage(context.Background(), raw); !errors.Is(err, ErrInvalidAuth) {
+		t.Fatalf("usage error = %v", err)
 	}
 }
 
@@ -385,6 +444,7 @@ func testAuth(t *testing.T, userID, accountID string, tokenFields, topFields map
 	t.Helper()
 	tokens := map[string]any{
 		"id_token": testJWT(userID, accountID, time.Unix(1_900_000_000, 0)), "account_id": accountID,
+		"access_token": "default-access",
 	}
 	for key, value := range tokenFields {
 		tokens[key] = value

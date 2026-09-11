@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/agensfield/verso/internal/accounts"
 )
 
 const (
@@ -30,6 +32,7 @@ const (
 
 var (
 	ErrDeviceExpired    = errors.New("device authorization expired")
+	ErrDeviceDenied     = errors.New("device authorization denied")
 	ErrLoginRequired    = errors.New("login required")
 	ErrRateLimited      = errors.New("quota request rate limited")
 	ErrIdentityMismatch = errors.New("refreshed credential identity changed")
@@ -205,6 +208,12 @@ func (c *Client) DeviceLogin(ctx context.Context, onCode func(DevicePrompt) erro
 			return nil, fmt.Errorf("poll device authorization: %w", err)
 		}
 		code := responseErrorCode(polled.Error, polled.ErrorCode, polled.Code)
+		switch code {
+		case "expired_token", "device_code_expired", "authorization_expired":
+			return nil, ErrDeviceExpired
+		case "access_denied", "authorization_denied", "authorization_declined", "user_denied":
+			return nil, ErrDeviceDenied
+		}
 		pending := status == http.StatusForbidden || status == http.StatusNotFound ||
 			code == "authorization_pending" || code == "slow_down" ||
 			strings.EqualFold(polled.Status, "pending") || strings.EqualFold(polled.Status, "authorization_pending")
@@ -278,6 +287,9 @@ func (c *Client) Refresh(ctx context.Context, rawAuth []byte) ([]byte, error) {
 	}
 	if status < 200 || status >= 300 {
 		return nil, statusError("refresh", status)
+	}
+	if refreshed.IDToken == "" && refreshed.AccessToken == "" && refreshed.RefreshToken == "" {
+		return nil, errors.New("refresh response is incomplete")
 	}
 	if refreshed.IDToken != "" {
 		newIdentity, err := identityFromToken(refreshed.IDToken)
@@ -426,6 +438,9 @@ func (w windowPayload) toWindow() *Window {
 type identity struct{ userID, accountID string }
 
 func parseAuth(raw []byte) (map[string]json.RawMessage, map[string]json.RawMessage, identity, error) {
+	if _, err := accounts.ParseNativeAuth(raw); err != nil {
+		return nil, nil, identity{}, ErrInvalidAuth
+	}
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(raw, &doc) != nil || doc == nil {
 		return nil, nil, identity{}, ErrInvalidAuth

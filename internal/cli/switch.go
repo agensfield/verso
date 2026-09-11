@@ -28,7 +28,15 @@ func (a *App) inspector() (codex.Inspector, error) {
 			return codex.Inspector{}, errors.New("cannot resolve startup working directory")
 		}
 	}
-	return codex.Inspector{Home: a.CodexHome, Binary: a.Binary, Version: a.Version, Env: a.Env, Run: a.RunCommand, CWD: cwd, Resolver: a.CredentialResolver}, nil
+	resolver := a.CredentialResolver
+	if resolver == nil {
+		resolver = codex.NewLocalCredentialResolver(a.RunCommand)
+	}
+	env := a.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	return codex.Inspector{LaunchEnvKnown: true, LaunchArgs: []string{"app-server", "--listen", "unix://"}, Home: a.CodexHome, Binary: a.Binary, Version: a.Version, Env: env, Run: a.RunCommand, CWD: cwd, Resolver: resolver}, nil
 }
 func (a *App) network() quota.Client {
 	if client, ok := a.Auth.(quota.Client); ok {

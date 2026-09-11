@@ -108,3 +108,43 @@ func TestSwitchCommandRejectsAgentBeforeInspection(t *testing.T) {
 		t.Fatal("agent switch wrote state")
 	}
 }
+
+func TestImportAndRemovalPreserveNativeSelection(t *testing.T) {
+	a, out, errOut := appFixture(t)
+	a.CredentialResolver = fixtureResolver{}
+	if err := os.MkdirAll(a.CodexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	raw := quotaAuth("a", "native-current")
+	name := filepath.Join(a.CodexHome, "auth.json")
+	if err := os.WriteFile(name, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.CodexHome, "config.toml"), []byte("cli_auth_credentials_store = \"file\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if a.Run(context.Background(), []string{"import", "personal"}) != 0 {
+		t.Fatal(errOut.String())
+	}
+	if strings.Contains(out.String(), "native-current") {
+		t.Fatal("import leaked credentials")
+	}
+	if a.Run(context.Background(), []string{"remove", "personal"}) == 0 {
+		t.Fatal("active removal succeeded")
+	}
+	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inactive, _ := accounts.ParseNativeAuth(quotaAuth("b", "saved-other"))
+	if _, err = store.Save(inactive, "work"); err != nil {
+		t.Fatal(err)
+	}
+	if a.Run(context.Background(), []string{"remove", "work"}) != 0 {
+		t.Fatal(errOut.String())
+	}
+	after, _ := os.ReadFile(name)
+	if string(after) != string(raw) {
+		t.Fatal("account command changed native auth")
+	}
+}

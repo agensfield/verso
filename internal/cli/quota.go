@@ -109,6 +109,9 @@ func quotaText(e quota.Entry) string {
 	if !e.CheckedAt.IsZero() {
 		result += "; observed " + e.CheckedAt.Local().Format(time.RFC3339)
 	}
+	if e.Warning != "" {
+		result += "; " + e.Warning
+	}
 	return result
 }
 

@@ -124,7 +124,8 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 		if !known {
 			e.Warning = "selected account unknown; credential refresh skipped"
 		}
-		if active && s.ActiveUsage == nil {
+		if active {
+			e.LoginRequired = false
 			e.Warning = "active quota unavailable; Codex owns credential refresh"
 		}
 	}

@@ -19,9 +19,11 @@ import (
 	"github.com/agensfield/verso/internal/operation"
 	"github.com/agensfield/verso/internal/quota"
 	"github.com/agensfield/verso/internal/switcher"
+	"github.com/agensfield/verso/internal/updater"
 )
 
 type App struct {
+	UpdateAction       func(context.Context, bool) (updater.Result, error)
 	StateDir           string
 	CodexHome          string
 	Binary             string
@@ -38,6 +40,7 @@ type App struct {
 }
 
 type response struct {
+	Update   *updater.Result        `json:"update,omitempty"`
 	Plan     *switcher.Plan         `json:"plan,omitempty"`
 	Quotas   map[string]quota.Entry `json:"quotas,omitempty"`
 	Switch   *switcher.Result       `json:"switch_result,omitempty"`
@@ -58,12 +61,15 @@ const usage = `Verso — Codex account switching (alpha, under development)
 Usage: verso [options] <command>
 
   switch [account]      Select an account with human approval
+  import [alias]        Save the current native Codex login
+  remove <account>      Delete an inactive saved account
   add [alias]           Save an account using device authorization
   quota [account]       Fetch quota on demand; --refresh bypasses recent cache
   list                  List saved accounts without refreshing credentials
   status                Inspect local native account/runtime metadata
   preview <account>     Read-only switch preview for humans and agents
   recovery              Read unfinished-switch and Herdr recovery metadata
+  update [--check]      Update a known binary/Go install; defer Homebrew to brew
   version               Print the build version
 
 Options:
@@ -96,6 +102,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	version := fs.Bool("version", false, "")
 	shortVersion := fs.Bool("v", false, "")
 	refresh := fs.Bool("refresh", false, "")
+	checkUpdate := fs.Bool("check", false, "")
 	allowExhausted := fs.Bool("allow-exhausted", false, "")
 	allowNoSnapshot := fs.Bool("allow-no-snapshot", false, "")
 	ordered, err := flagsFirst(fs, args)
@@ -126,11 +133,17 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if command == "version" && len(pos) == 0 {
 		return a.finish(response{Command: command, Message: a.Version}, nil)
 	}
+	if command == "update" {
+		return a.updateCommand(ctx, pos, *checkUpdate)
+	}
 	if command == "quota" {
 		return a.quotaCommand(ctx, pos, *refresh)
 	}
 	if command == "switch" {
 		return a.switchAccount(ctx, pos, *allowExhausted, *allowNoSnapshot)
+	}
+	if command == "import" || command == "remove" {
+		return a.accountMutation(ctx, command, pos)
 	}
 	if command == "add" {
 		return a.add(ctx, pos)
@@ -192,14 +205,10 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		r.Message = "Preview only; no credentials were refreshed or activated."
 		return a.finish(r, e)
 	}
-	cwd := a.CWD
-	if cwd == "" {
-		cwd, err = os.Getwd()
-		if err != nil {
-			return a.finish(r, errors.New("cannot resolve startup working directory"))
-		}
+	inspector, err := a.inspector()
+	if err != nil {
+		return a.finish(r, err)
 	}
-	inspector := codex.Inspector{CWD: cwd, Resolver: a.CredentialResolver, Home: a.CodexHome, Binary: a.Binary, Version: a.Version, Env: a.Env, Run: a.RunCommand}
 	o, err := inspector.Inspect(ctx)
 	r.Runtime = &o
 	if err != nil {

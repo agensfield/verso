@@ -18,7 +18,7 @@ func appFixture(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
 	home := t.TempDir()
-	a := &App{StateDir: filepath.Join(home, "state"), CodexHome: filepath.Join(home, "codex"), Version: "test", Out: out, Err: errOut, RunCommand: func(context.Context, string, ...string) ([]byte, error) { return nil, nil }}
+	a := &App{StateDir: filepath.Join(home, "state"), CodexHome: filepath.Join(home, "codex"), Version: "test", Env: []string{}, Out: out, Err: errOut, RunCommand: func(context.Context, string, ...string) ([]byte, error) { return nil, nil }}
 	return a, out, errOut
 }
 func TestHelpAndVersionDoNotTouchState(t *testing.T) {

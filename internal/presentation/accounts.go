@@ -94,8 +94,12 @@ func writeAccount(b *strings.Builder, p palette, account accounts.Account, entry
 
 	windowCount := 0
 	if entry.Quota != nil {
-		windowCount += writeWindow(b, p, "5h", entry.Quota.Primary, now)
-		windowCount += writeWindow(b, p, "weekly", entry.Quota.Secondary, now)
+		observedAt := entry.CheckedAt
+		if !entry.Quota.ObservedAt.IsZero() {
+			observedAt = entry.Quota.ObservedAt
+		}
+		windowCount += writeWindow(b, p, 1, entry.Quota.Primary, observedAt, now)
+		windowCount += writeWindow(b, p, 2, entry.Quota.Secondary, observedAt, now)
 	}
 
 	status := accountStatus(entry, found, cached, now)
@@ -107,18 +111,20 @@ func writeAccount(b *strings.Builder, p palette, account accounts.Account, entry
 	}
 }
 
-func writeWindow(b *strings.Builder, p palette, label string, window *auth.Window, now time.Time) int {
+func writeWindow(b *strings.Builder, p palette, position int, window *auth.Window, observedAt, now time.Time) int {
 	if window == nil {
 		return 0
 	}
-	reset := formatReset(window, now)
+	label := windowLabel(window, position)
+	reset := formatReset(window, observedAt, now)
 	if window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) {
-		fmt.Fprintf(b, "  %-6s %s%s\n", label, p.quiet("usage unknown"), reset)
+		fmt.Fprintf(b, "  %-8s %s%s\n", label, p.quiet("usage unknown"), reset)
 		return 1
 	}
 	remaining := clamp(100 - *window.UsedPercent)
 	bar := quotaBar(p, remaining)
-	line := fmt.Sprintf("  %-6s %s  %3.0f%% left%s", label, bar, remaining, reset)
+	percent := p.ansi(quotaColor(remaining), fmt.Sprintf("%9s", remainingText(remaining)))
+	line := fmt.Sprintf("  %-8s %s  %s%s", label, bar, percent, reset)
 	b.WriteString(line)
 	b.WriteByte('\n')
 	return 1
@@ -127,13 +133,24 @@ func writeWindow(b *strings.Builder, p palette, label string, window *auth.Windo
 func quotaBar(p palette, remaining float64) string {
 	filled := int(math.Round(remaining / (100 / barWidth)))
 	filled = max(0, min(barWidth, filled))
+	return p.ansi(quotaColor(remaining), strings.Repeat("▰", filled)) + p.quiet(strings.Repeat("▱", barWidth-filled))
+}
+
+func quotaColor(remaining float64) string {
 	code := "36"
 	if remaining <= 10 {
 		code = "31;1"
 	} else if remaining <= 30 {
 		code = "33"
 	}
-	return p.ansi(code, strings.Repeat("▰", filled)) + p.quiet(strings.Repeat("▱", barWidth-filled))
+	return code
+}
+
+func remainingText(remaining float64) string {
+	if remaining > 0 && remaining < 1 {
+		return "<1% left"
+	}
+	return fmt.Sprintf("%.0f%% left", remaining)
 }
 
 func accountStatus(entry quota.Entry, found, cached bool, now time.Time) string {
@@ -158,18 +175,35 @@ func accountStatus(entry quota.Entry, found, cached bool, now time.Time) string 
 	return strings.Join(status, " · ")
 }
 
-func formatReset(window *auth.Window, now time.Time) string {
-	if window.ResetAfter != nil {
-		return " · in " + formatDuration(*window.ResetAfter)
-	}
+func formatReset(window *auth.Window, observedAt, now time.Time) string {
 	if window.ResetsAt != nil {
 		location := now.Location()
 		if location == nil {
 			location = time.Local
 		}
-		return " · " + window.ResetsAt.In(location).Format("Mon 15:04")
+		return " · resets " + window.ResetsAt.In(location).Format("Mon 15:04")
+	}
+	if window.ResetAfter != nil {
+		remaining := *window.ResetAfter
+		if !observedAt.IsZero() && now.After(observedAt) {
+			remaining -= now.Sub(observedAt)
+		}
+		if remaining <= 0 {
+			return " · resets now"
+		}
+		return " · resets in " + formatDuration(remaining)
 	}
 	return ""
+}
+
+func windowLabel(window *auth.Window, position int) string {
+	if window.Window == nil || *window.Window <= 0 {
+		return fmt.Sprintf("quota %d", position)
+	}
+	if *window.Window == 7*24*time.Hour {
+		return "weekly"
+	}
+	return formatDuration(*window.Window)
 }
 
 func formatDuration(duration time.Duration) string {

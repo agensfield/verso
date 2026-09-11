@@ -75,6 +75,19 @@ func ParseNativeAuth(raw []byte) (NativeAuth, error) {
 		return NativeAuth{}, fmt.Errorf("parse auth document: %w", err)
 	}
 	mode := strings.TrimSpace(doc.AuthMode)
+	if mode == "" {
+		// Native resolved_mode prefers these legacy credentials over ChatGPT
+		// tokens when no explicit mode is present. Preserve that precedence.
+		for _, key := range []string{"personal_access_token", "bedrock_api_key", "bedrock_access_keys", "OPENAI_API_KEY"} {
+			value, present := object[key]
+			if present && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				if key == "OPENAI_API_KEY" {
+					return NativeAuth{}, ErrAPIKeyAuth
+				}
+				return NativeAuth{}, ErrUnsupportedAuth
+			}
+		}
+	}
 	if mode == "apikey" || (len(doc.Tokens) == 0 && hasNonEmptyString(doc.OpenAIKey)) {
 		return NativeAuth{}, ErrAPIKeyAuth
 	}

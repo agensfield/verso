@@ -22,6 +22,13 @@ type RPC struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
 	next int64
+	Info ServerInfo
+}
+
+type ServerInfo struct {
+	UserAgent  string `json:"userAgent"`
+	CodexHome  string `json:"codexHome"`
+	PlatformOS string `json:"platformOs"`
 }
 
 type rpcError struct {
@@ -56,8 +63,7 @@ func DialRPC(ctx context.Context, socket, version string) (*RPC, error) {
 	conn.SetReadLimit(8 << 20)
 	rpc := &RPC{conn: conn}
 	params := map[string]any{"clientInfo": map[string]string{"name": "verso", "title": "Verso", "version": version}, "capabilities": map[string]bool{"experimentalApi": true}}
-	var reply json.RawMessage
-	if err := rpc.Call(ctx, "initialize", params, &reply); err != nil {
+	if err := rpc.Call(ctx, "initialize", params, &rpc.Info); err != nil {
 		_ = conn.CloseNow()
 		return nil, err
 	}

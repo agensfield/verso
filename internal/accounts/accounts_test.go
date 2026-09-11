@@ -36,6 +36,27 @@ func TestParseNativeAuth(t *testing.T) {
 	}
 }
 
+func TestImplicitNativeModePrecedence(t *testing.T) {
+	for _, key := range []string{"OPENAI_API_KEY", "personal_access_token", "bedrock_api_key", "bedrock_access_keys"} {
+		raw := authFixture(t, "u", "a", "one@example.com", "access", nil)
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		delete(doc, "auth_mode")
+		doc[key] = "synthetic-other-auth"
+		encoded, _ := json.Marshal(doc)
+		if _, err := ParseNativeAuth(encoded); err == nil {
+			t.Fatalf("accepted implicit %s as ChatGPT", key)
+		}
+		doc["auth_mode"] = "chatgpt"
+		encoded, _ = json.Marshal(doc)
+		if _, err := ParseNativeAuth(encoded); err != nil {
+			t.Fatalf("explicit chatgpt: %v", err)
+		}
+	}
+}
+
 func TestParseNativeAuthRejectsUnsupportedAndUncertainIdentity(t *testing.T) {
 	tests := []struct {
 		name string

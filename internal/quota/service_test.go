@@ -148,3 +148,19 @@ func TestFailedFetchPreservesSuccessTimeAndMarksStale(t *testing.T) {
 		t.Fatalf("%+v %v", cached, err)
 	}
 }
+
+func TestSelectionGuardRunsAgainImmediatelyBeforeRotation(t *testing.T) {
+	s, f, acc := fixture(t)
+	checks := 0
+	s.CheckSelection = func() error {
+		checks++
+		if checks > 1 {
+			return ErrSelectionChanged
+		}
+		return nil
+	}
+	_, err := s.Refresh(context.Background(), acc.ID, true)
+	if err != ErrSelectionChanged || f.refreshes != 0 {
+		t.Fatalf("%v %+v", err, f)
+	}
+}

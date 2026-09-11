@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/agensfield/verso/internal/accounts"
+	application "github.com/agensfield/verso/internal/app"
 	"github.com/agensfield/verso/internal/auth"
-	"github.com/agensfield/verso/internal/codex"
 	"github.com/agensfield/verso/internal/operation"
 	"github.com/agensfield/verso/internal/quota"
 	"github.com/agensfield/verso/internal/selection"
@@ -28,7 +28,7 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 	}
 	observation, inspectErr := inspector.Inspect(ctx)
 	active := accounts.ActiveIdentity{}
-	if inspectErr == nil && observation.Credential.Status == codex.CredentialFileSelected {
+	if inspectErr == nil && application.FileSelectionAllowed(observation) {
 		active = observation.SelectedFile
 	}
 	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
@@ -36,7 +36,19 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 		return nil, err
 	}
 	client := a.network()
-	service := quota.Service{Root: a.StateDir, Store: store, Client: client, Active: active}
+	service := quota.Service{CheckSelection: func() error {
+		if !selection.Complete(active) {
+			return nil
+		} // service itself suppresses refresh for unknown selection
+		_, now, err := selection.Read(a.CodexHome)
+		if err != nil {
+			return err
+		}
+		if !selection.Equal(now, active) {
+			return selection.ErrChanged
+		}
+		return nil
+	}, Root: a.StateDir, Store: store, Client: client, Active: active}
 	service.ActiveUsage = func(ctx context.Context) (auth.Quota, error) {
 		// Read the authoritative file, never the potentially stale saved copy, and
 		// use Usage only. A failed active request does not authorize Verso refresh.

@@ -67,7 +67,12 @@ func (b *Backend) Inspect(ctx context.Context, target string) (switcher.Inspecti
 	if err != nil {
 		return state, err
 	}
-	state.FileBacked = o.Credential.Status == codex.CredentialFileSelected
+	state.FileBacked = FileSelectionAllowed(o)
+	if o.Credential.Warning != "" {
+		state.Warnings = append(state.Warnings, o.Credential.Warning)
+	} else if o.Daemon == switcher.Stopped {
+		state.Warnings = append(state.Warnings, "managed account configuration may override local credential mode when Codex starts")
+	}
 	if !state.FileBacked {
 		return state, fmt.Errorf("native credential configuration is unproven: %s", o.Credential.Reason)
 	}
@@ -142,7 +147,24 @@ func (b *Backend) PrepareTarget(ctx context.Context, target string) error {
 	if err != nil {
 		return err
 	}
-	service := quota.Service{Root: b.Root, Store: store, Client: b.Auth, Now: b.Now, Active: b.observation.SelectedFile}
+	_, current, err := selection.Read(b.Home)
+	if err != nil {
+		return err
+	}
+	if !selection.Equal(current, b.observation.SelectedFile) {
+		return selection.ErrChanged
+	}
+	guard := func() error {
+		_, now, err := selection.Read(b.Home)
+		if err != nil {
+			return err
+		}
+		if !selection.Equal(now, current) {
+			return selection.ErrChanged
+		}
+		return nil
+	}
+	service := quota.Service{CheckSelection: guard, Root: b.Root, Store: store, Client: b.Auth, Now: b.Now, Active: b.observation.SelectedFile}
 	entry, err := service.Refresh(ctx, account.ID, true)
 	if err != nil {
 		return err
@@ -304,3 +326,11 @@ func (b *Backend) Verify(ctx context.Context, handle string, hadDaemon bool) err
 	}
 	return nil
 }
+
+// FileSelectionAllowed expresses the alpha operator boundary. Local mode is
+// sufficient only with no daemon; it never verifies a running server's config.
+func FileSelectionAllowed(o codex.Observation) bool {
+	return o.Credential.Status == codex.CredentialFileSelected || (o.Daemon == switcher.Stopped && o.Credential.Status == codex.CredentialLocalFile)
+}
+
+func (b *Backend) Standalone() bool { return b.observation.Daemon == switcher.Stopped }

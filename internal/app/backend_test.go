@@ -211,3 +211,41 @@ func TestUnsuccessfulReauthNeverStopsOutgoingRuntime(t *testing.T) {
 		t.Fatalf("%v %+v", err, r)
 	}
 }
+
+func TestPrepareRejectsSelectionDriftBeforeRefresh(t *testing.T) {
+	b, _, target := backendFixture(t, false)
+	if _, err := b.Inspect(context.Background(), target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b.Home, "auth.json"), native("b"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.PrepareTarget(context.Background(), target.ID); err != selection.ErrChanged {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedTargetStartRestoresLoggedOutDaemon(t *testing.T) {
+	b, r, target := backendFixture(t, true)
+	r.failFirstStart = true
+	if err := os.Remove(filepath.Join(b.Home, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := (switcher.Engine{Backend: b}).Execute(context.Background(), switcher.Request{Target: target.ID}, func(switcher.Plan) error { return nil })
+	if err == nil || !out.RollbackSucceeded || !out.ActiveKnown || out.Active != "" || !r.running {
+		t.Fatalf("%+v %v", out, err)
+	}
+	if _, err := os.Stat(filepath.Join(b.Home, "auth.json")); !os.IsNotExist(err) {
+		t.Fatal("logout rollback left auth file")
+	}
+}
+func TestLocalFileBoundaryCannotAuthorizeRunningDaemon(t *testing.T) {
+	o := codex.Observation{Daemon: switcher.Stopped, Credential: codex.CredentialProof{Status: codex.CredentialLocalFile}}
+	if !FileSelectionAllowed(o) {
+		t.Fatal("accepted standalone boundary rejected")
+	}
+	o.Daemon = switcher.Running
+	if FileSelectionAllowed(o) {
+		t.Fatal("local mode authorized running daemon")
+	}
+}

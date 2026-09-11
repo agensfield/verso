@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -43,6 +44,9 @@ func (r *NativeRuntime) Stop(ctx context.Context, expected codex.ProcessRecord) 
 	if current.Daemon != switcher.Running || current.Record == nil || *current.Record != expected {
 		return errors.New("managed daemon changed before stop")
 	}
+	if current.Credential.Status != codex.CredentialFileSelected {
+		return switcher.ErrBackend
+	}
 	if len(current.Busy) > 0 {
 		return switcher.ErrBusy
 	}
@@ -59,6 +63,9 @@ func (r *NativeRuntime) Start(ctx context.Context, cwd string) error {
 	return r.command(ctx, "start", cwd)
 }
 func (r *NativeRuntime) command(ctx context.Context, action, cwd string) error {
+	if !filepath.IsAbs(cwd) {
+		return errors.New("managed startup working directory is unavailable")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 80*time.Second)
 	defer cancel()
 	binary := r.Inspector.Binary

@@ -29,11 +29,15 @@ type Entry struct {
 	Warning       string      `json:"warning,omitempty"`
 }
 
+var ErrSelectionChanged = errors.New("selected native identity changed during quota inspection")
+
 type Service struct {
-	Root   string
-	Store  *accounts.Store
-	Client Client
-	Now    func() time.Time
+	// CheckSelection is an instantaneous guard, not a lock against Codex writers.
+	CheckSelection func() error
+	Root           string
+	Store          *accounts.Store
+	Client         Client
+	Now            func() time.Time
 	// Active is the selected native identity. Unknown forbids token refresh.
 	Active accounts.ActiveIdentity
 	// ActiveUsage delegates active-account observation to Codex, which owns
@@ -77,6 +81,9 @@ func (s Service) readCache() (map[string]Entry, error) {
 // Refresh reuses observations for one minute unless explicitly refreshed.
 // Failure retains stale data with a warning, never fabricating zero usage.
 func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, error) {
+	if s.CheckSelection != nil && s.CheckSelection() != nil {
+		return Entry{}, ErrSelectionChanged
+	}
 	account, err := s.Store.Find(id)
 	if err != nil {
 		return Entry{}, err
@@ -108,6 +115,9 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 		}
 	default:
 		q, err = s.inactive(ctx, account)
+	}
+	if errors.Is(err, ErrSelectionChanged) {
+		return previous, err
 	}
 	if err == nil {
 		e.Quota = &q
@@ -169,6 +179,9 @@ func (s Service) inactive(ctx context.Context, account accounts.Account) (auth.Q
 }
 
 func (s Service) refresh(ctx context.Context, account accounts.Account, raw []byte) ([]byte, error) {
+	if s.CheckSelection != nil && s.CheckSelection() != nil {
+		return nil, ErrSelectionChanged
+	}
 	next, err := s.Client.Refresh(ctx, raw)
 	if err != nil {
 		return nil, err

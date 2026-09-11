@@ -165,6 +165,9 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 	r.Switch = &result
 	if err == nil {
 		r.Message = "Account selected."
+		if result.Changed && backend.Standalone() {
+			r.Message = "Credential file updated. Close and reopen Codex to apply the selection; managed configuration may override local mode."
+		}
 		if !result.Changed {
 			r.Message = "That account is already selected."
 		}

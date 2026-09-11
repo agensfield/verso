@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/agensfield/verso/internal/accounts"
-	"github.com/agensfield/verso/internal/codex"
+	application "github.com/agensfield/verso/internal/app"
 	"github.com/agensfield/verso/internal/operation"
 	"github.com/agensfield/verso/internal/selection"
 )
@@ -32,7 +32,7 @@ func (a *App) accountMutation(ctx context.Context, command string, args []string
 	if err != nil {
 		return a.finish(r, err)
 	}
-	if observed.Credential.Status != codex.CredentialFileSelected {
+	if !application.FileSelectionAllowed(observed) {
 		return a.finish(r, errors.New("native credential mode is unproven: "+observed.Credential.Reason))
 	}
 	raw, selected, err := selection.Read(a.CodexHome)

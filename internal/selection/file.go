@@ -102,7 +102,7 @@ func Clear(home string, expected accounts.ActiveIdentity) error {
 // Native Codex homes may be 0755. Protect the credential and temporary file,
 // while requiring the directory to be owned and not writable by other users.
 func checkDirectory(home string) error {
-	info, err := os.Stat(home)
+	info, err := os.Lstat(home)
 	if err != nil {
 		return errors.New("cannot inspect native credential directory")
 	}

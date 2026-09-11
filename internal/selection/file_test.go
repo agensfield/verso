@@ -111,3 +111,25 @@ func TestNativeHomeMayBeReadableButNotWritableByOthers(t *testing.T) {
 		t.Fatal("unsafe directory accepted")
 	}
 }
+
+func TestNativeHomeSymlinkCannotRedirectMutation(t *testing.T) {
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "auth.json"), native("a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "codex")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	selected := accounts.ActiveIdentity{Known: true, UserID: "user", AccountID: "a"}
+	if err := Install(link, native("b"), selected); err == nil {
+		t.Fatal("symlink root accepted")
+	}
+	if err := Clear(link, selected); err == nil {
+		t.Fatal("symlink root removal accepted")
+	}
+	raw, _ := os.ReadFile(filepath.Join(target, "auth.json"))
+	if string(raw) != string(native("a")) {
+		t.Fatal("redirected mutation")
+	}
+}

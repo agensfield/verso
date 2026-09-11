@@ -50,6 +50,7 @@ func TestListIsReadOnlyAndJSONFlagsInterspersed(t *testing.T) {
 }
 func TestListAndPreviewDoNotExposeCredentials(t *testing.T) {
 	a, out, _ := appFixture(t)
+	a.CredentialResolver = fixtureResolver{}
 	s, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +77,8 @@ func TestListAndPreviewDoNotExposeCredentials(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(a.CodexHome, "config.toml"), []byte("cli_auth_credentials_store = \"file\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if code := a.Run(context.Background(), []string{"preview", "personal", "--json"}); code == 0 {
-		t.Fatal("preview blessed an unproven user-only config")
+	if code := a.Run(context.Background(), []string{"preview", "personal", "--json"}); code != 0 {
+		t.Fatal(out.String())
 	}
 	if strings.Contains(out.String(), "NEVER-PRINT") {
 		t.Fatal("preview leak")

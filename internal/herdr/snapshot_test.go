@@ -11,7 +11,7 @@ import (
 const fixture = `{"result":{"snapshot":{"version":"test","workspaces":[{"workspace_id":"w1","label":"work"}],"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"orchestrator"}],"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","cwd":"/synthetic","terminal_title":"SECRET-TITLE","environment":{"TOKEN":"SECRET-ENV"}}],"agents":[{"name":"verso","agent":"codex","pane_id":"w1:p1","agent_session":{"kind":"id","value":"synthetic-thread-id","source":"herdr:codex"}}],"layouts":[],"transcript":"SECRET-TRANSCRIPT"}}}`
 
 func TestSnapshotWhitelistRotationAndFailedCapturePreservesPrevious(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "state")
 	now := time.Unix(123, 0)
 	if err := Capture(root, []byte(fixture), now); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestSnapshotWhitelistRotationAndFailedCapturePreservesPrevious(t *testing.T
 	}
 }
 func TestBrokenLocatorRefusesCapture(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "state")
 	broken := strings.Replace(fixture, `"pane_id":"w1:p1","agent_session"`, `"pane_id":"missing","agent_session"`, 1)
 	if err := Capture(root, []byte(broken), time.Now()); err == nil {
 		t.Fatal("dangling agent accepted")

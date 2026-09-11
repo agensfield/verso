@@ -87,3 +87,27 @@ func TestPartialIdentityIsNotASelectionGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNativeHomeMayBeReadableButNotWritableByOthers(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Chmod(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(home, native("a"), accounts.ActiveIdentity{Known: true}); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(filepath.Join(home, "auth.json"))
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("credentials not private")
+	}
+	dir, _ := os.Stat(home)
+	if dir.Mode().Perm() != 0755 {
+		t.Fatal("changed native home permissions")
+	}
+	if err := os.Chmod(home, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(home, native("b"), accounts.ActiveIdentity{Known: true, UserID: "user", AccountID: "a"}); err == nil {
+		t.Fatal("unsafe directory accepted")
+	}
+}

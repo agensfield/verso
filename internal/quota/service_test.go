@@ -34,7 +34,7 @@ func credentials(exp int64, user, account string) []byte {
 }
 func fixture(t *testing.T) (Service, *fakeClient, accounts.Account) {
 	t.Helper()
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "state")
 	store, err := accounts.Open(filepath.Join(root, "accounts"))
 	if err != nil {
 		t.Fatal(err)

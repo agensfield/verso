@@ -16,6 +16,10 @@ func stoppedRequest(t *testing.T) CredentialResolveRequest {
 	t.Helper()
 	home := t.TempDir()
 	cwd := t.TempDir()
+	cwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("cli_auth_credentials_store = \"file\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}

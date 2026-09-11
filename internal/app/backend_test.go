@@ -82,7 +82,7 @@ func native(account string) []byte {
 }
 func backendFixture(t *testing.T, running bool) (*Backend, *fakeRuntime, accounts.Account) {
 	t.Helper()
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "state")
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "auth.json"), native("a"), 0600); err != nil {
 		t.Fatal(err)

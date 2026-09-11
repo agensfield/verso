@@ -10,7 +10,6 @@ import (
 	"syscall"
 
 	"github.com/agensfield/verso/internal/accounts"
-	"github.com/agensfield/verso/internal/operation"
 )
 
 var ErrChanged = errors.New("native credential identity changed; re-inspect before continuing")
@@ -71,11 +70,14 @@ func Install(home string, raw []byte, expected accounts.ActiveIdentity) error {
 	if !Equal(current, expected) {
 		return ErrChanged
 	}
-	return operation.AtomicWrite(home, "auth.json", raw)
+	return writeNative(home, raw)
 }
 
 // Clear restores a known previously logged-out state during rollback only.
 func Clear(home string, expected accounts.ActiveIdentity) error {
+	if err := checkDirectory(home); err != nil {
+		return err
+	}
 	_, current, err := Read(home)
 	if err != nil {
 		return err
@@ -88,6 +90,51 @@ func Clear(home string, expected accounts.ActiveIdentity) error {
 	}
 	if err := os.Remove(filepath.Join(home, "auth.json")); err != nil {
 		return errors.New("cannot restore logged-out native state")
+	}
+	dir, err := os.Open(home)
+	if err != nil {
+		return errors.New("cannot sync native credential directory")
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+// Native Codex homes may be 0755. Protect the credential and temporary file,
+// while requiring the directory to be owned and not writable by other users.
+func checkDirectory(home string) error {
+	info, err := os.Stat(home)
+	if err != nil {
+		return errors.New("cannot inspect native credential directory")
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || !ok || st.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0022 != 0 {
+		return errors.New("native credential directory must be owned and not writable by others")
+	}
+	return nil
+}
+func writeNative(home string, raw []byte) error {
+	if err := checkDirectory(home); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(home, ".auth-*")
+	if err != nil {
+		return errors.New("cannot create private native credential replacement")
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if _, err = f.Write(raw); err != nil {
+		_ = f.Close()
+		return errors.New("cannot write native credential replacement")
+	}
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		return errors.New("cannot sync native credential replacement")
+	}
+	if err = f.Close(); err != nil {
+		return errors.New("cannot close native credential replacement")
+	}
+	if err = os.Rename(name, filepath.Join(home, "auth.json")); err != nil {
+		return errors.New("cannot activate native credentials")
 	}
 	dir, err := os.Open(home)
 	if err != nil {

@@ -1,11 +1,15 @@
-# Verso v0.1.0-alpha.3
+# Verso v0.1.0-alpha.4
 
 Early public alpha of the Codex account switcher.
 
-This revision fixes current-login import and saved-account removal being blocked
-by an unrelated conversation's error status. Credential identity and configuration
-checks remain; the stricter activity checks still apply to account switching.
-It also includes alpha.2's fix for Codex's default OpenAI provider.
+This revision makes `list` the account-and-usage view: it refreshes usage and
+inactive credentials when needed, displays compact remaining-usage bars and reset
+times, and keeps IDs in JSON. `list --cached` provides a read-only view. The separate
+`quota` command is removed.
+
+Normal help is short, with details under `verso help <command>`. Agent instructions
+ship inside the binary at `verso --skill` (also `verso skill`). Switch safeguards
+and Codex ownership of active-account refresh are unchanged.
 
 - Direct device authorization and current-login import, with optional aliases.
 - One native Codex home, private saved accounts, demand-driven quota and inactive refresh.

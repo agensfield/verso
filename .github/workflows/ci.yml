@@ -39,6 +39,8 @@ jobs:
           go build -o "$RUNNER_TEMP/verso" ./cmd/verso
           "$RUNNER_TEMP/verso" --help
           "$RUNNER_TEMP/verso" version
+          (cd "$RUNNER_TEMP" && ./verso --skill > verso-skill.md)
+          test -s "$RUNNER_TEMP/verso-skill.md"
           "$RUNNER_TEMP/verso" licenses > "$RUNNER_TEMP/verso-licenses"
       - name: Isolated standalone PTY transaction
         run: python3 scripts/smoke/standalone.py "$RUNNER_TEMP/verso"

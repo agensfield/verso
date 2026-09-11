@@ -40,21 +40,23 @@ Verso does not silently change this setting or migrate keyring/auto credentials.
 ```sh
 verso import personal    # Save the current native Codex login
 verso add work           # Device authorization directly into Verso's store
-verso list
-verso quota             # Fetch stale quota on demand
+verso list               # Refresh accounts and show usage
+verso list --cached      # Read saved information without refreshing
 ```
 
 Aliases are optional and default to email. Email is not a unique identity across
-workspaces; use an alias or the displayed saved-account ID when lookup is ambiguous.
+workspaces; use an alias or the saved-account ID from `verso list --cached --json`
+when lookup is ambiguous. Normal output focuses on account names, remaining usage,
+reset times, and freshness.
 Adding an account does not activate it. Expired inactive credentials refresh
-silently when quota is fetched. Codex retains ownership of active-account refresh;
-failed active quota reads stay unknown. There is no resident service or scheduler.
+silently when `list` fetches usage. Codex retains ownership of active-account refresh;
+failed active usage reads stay unknown. There is no resident service or scheduler.
 
 ## Switch
 
 ```sh
-verso preview work       # Read-only: useful for humans and agents
-verso switch work        # Human terminal, explicit approval
+verso preview work       # Check without changing accounts
+verso switch work        # Review and confirm the switch
 verso switch            # Account picker with quota and reset times
 ```
 
@@ -79,8 +81,8 @@ mixed setups; they may retain the old account until reopened.
   warns and allows proceeding. There is no automatic fallback to another account.
 - Herdr capture failure blocks unless you pass `--allow-no-snapshot`. No Herdr
   means no snapshot. One private checkpoint replaces the previous successful one.
-- Agents may preview. Switch execution requires a human terminal; there is no
-  `--yes`, force-cancel, delayed switch, or automatic restoration.
+- Switching asks for confirmation in your terminal. There is no force-cancel,
+  delayed switch, or automatic restoration.
 
 Visible-idle checks and selection rereads are snapshots. Verso's lock serializes
 Verso processes, not Codex or other credential writers. Do not concurrently change
@@ -104,13 +106,20 @@ Private state defaults to `~/.local/share/verso` (`VERSO_HOME` or `--state-dir`)
 Native home follows `CODEX_HOME`, or `~/.codex` (`--codex-home`). `--codex-bin`
 selects the native executable. Files are private and replaced atomically; credentials
 are not encrypted separately. Protect this directory as you would your Codex login.
-`--json` is available for readouts; interactive login and switching remain human flows.
+`--json` is available for structured results. `list` refreshes by default; use
+`list --cached` for a read-only view. Login and switching prompt in your terminal.
 
 Selected profiles, project overrides, and managed configurations outside the
 conservatively supported inspection path can cause refusal. Custom saved provider
 behavior remains Codex's responsibility; Verso does not convert threads to ChatGPT.
 No legacy `codex-auth` migration, cross-machine sync, or per-thread account binding
 is included.
+
+## Agent-assisted use
+
+Run `verso --skill` to read the guide bundled with your installed version.
+It covers command permissions, JSON workflows, credential handling, and recovery.
+The guide is available offline without configuring an account.
 
 ## Development
 

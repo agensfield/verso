@@ -3,6 +3,8 @@
 Small Go CLI for human-operated Codex account switching. Keep the alpha simple.
 
 - Do not use em dashes in code, comments, CLI output, or documentation.
+- Keep normal help focused on the operator. Agent instructions live in
+  `internal/cli/agent-guide.md`, embedded in the binary as `verso --skill`.
 
 - Read existing code and the task contract before editing. Use Go builtins first.
 - Never read/log real credentials or switch/restart the shared Codex runtime for tests.

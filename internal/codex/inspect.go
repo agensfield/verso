@@ -62,9 +62,12 @@ type CredentialResolver interface {
 }
 
 type CredentialResolveRequest struct {
-	Home string
-	CWD  string
-	Env  []string
+	Home                string
+	CWD                 string
+	Env                 []string
+	EnvironmentComplete bool
+	Selection           accounts.ActiveIdentity
+	LaunchArgs          []string
 }
 
 type CredentialResolution struct {
@@ -72,6 +75,12 @@ type CredentialResolution struct {
 	Basis         string
 	Snapshot      string
 }
+
+// CredentialResolutionError carries a sanitized capability boundary suitable
+// for status output. Other resolver errors remain deliberately opaque.
+type CredentialResolutionError struct{ Reason string }
+
+func (e *CredentialResolutionError) Error() string { return e.Reason }
 
 type Observation struct {
 	Daemon         switcher.Daemon         `json:"daemon"`
@@ -102,13 +111,18 @@ func RunCommand(ctx context.Context, name string, args ...string) ([]byte, error
 }
 
 type Inspector struct {
-	Home     string
-	Binary   string
-	Version  string
-	Run      CommandRunner
-	Env      []string
-	CWD      string
-	Resolver CredentialResolver
+	Home    string
+	Binary  string
+	Version string
+	Run     CommandRunner
+	// Env and LaunchArgs describe the replacement process, not an inferred
+	// environment for an already-running server. Fresh verification requires
+	// LaunchEnvKnown so an omitted variable cannot be mistaken for absence.
+	Env            []string
+	CWD            string
+	Resolver       CredentialResolver
+	LaunchArgs     []string
+	LaunchEnvKnown bool
 }
 
 func (i Inspector) Socket() string {
@@ -199,7 +213,7 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	if o.Credential.Status == "" {
 		o.Credential = unknownCredential("effective credential mode has not been resolved")
 	}
-	if key := alternativeOverride(i.Env); key != "" {
+	if key := credentialOverride(i.Env, i.Home); key != "" {
 		o.Credential = unknownCredential("alternative auth or runtime override " + key + " is present")
 	}
 	processes, err := i.processes(ctx)
@@ -267,10 +281,15 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 			o.Credential = unknownCredential("stopped runtime has no complete config resolver")
 		} else if strings.TrimSpace(i.CWD) == "" || !filepath.IsAbs(i.CWD) {
 			o.Credential = unknownCredential("stopped runtime startup cwd is unavailable")
-		} else if alternativeOverride(i.Env) == "" && o.SelectedFile.Known {
-			resolved, resolveErr := i.Resolver.ResolveCredentialConfig(ctx, CredentialResolveRequest{Home: i.Home, CWD: i.CWD, Env: i.Env})
+		} else if credentialOverride(i.Env, i.Home) == "" && o.SelectedFile.Known {
+			resolved, resolveErr := i.Resolver.ResolveCredentialConfig(ctx, CredentialResolveRequest{Home: i.Home, CWD: i.CWD, Env: i.Env, EnvironmentComplete: i.LaunchEnvKnown, Selection: o.SelectedFile, LaunchArgs: i.LaunchArgs})
 			if resolveErr != nil {
-				o.Credential = unknownCredential("stopped runtime config sources could not be resolved")
+				reason := "stopped runtime config sources could not be resolved"
+				var capability *CredentialResolutionError
+				if errors.As(resolveErr, &capability) {
+					reason = capability.Reason
+				}
+				o.Credential = unknownCredential(reason)
 			} else if resolved.EffectiveMode != "file" || resolved.Basis == "" || resolved.Snapshot == "" {
 				o.Credential = unknownCredential("stopped runtime is not proven file-backed")
 			} else {
@@ -304,7 +323,7 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	cwd, cwdErr := i.processCWD(ctx, record.PID)
 	if cwdErr != nil || !filepath.IsAbs(cwd) {
 		o.Credential = unknownCredential("managed process startup cwd is unavailable")
-	} else if alternativeOverride(i.Env) == "" && managedOverride == "" && o.SelectedFile.Known {
+	} else if credentialOverride(i.Env, i.Home) == "" && managedOverride == "" && o.SelectedFile.Known {
 		cfg, snapshot, proof := resolveLiveCredential(ctx, rpc, cwd, o.SelectedFile)
 		o.Config, o.configSnapshot, o.Credential = cfg, snapshot, proof
 	} else if managedOverride != "" {
@@ -326,10 +345,19 @@ func unknownCredential(reason string) CredentialProof {
 	return CredentialProof{Status: CredentialUnknown, Reason: reason}
 }
 
-func alternativeOverride(env []string) string {
+func credentialOverride(env []string, home string) string {
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
-		if ok && value != "" && (key == "CODEX_ACCESS_TOKEN" || key == "OPENAI_API_KEY" || key == "CODEX_EXEC_SERVER_URL" || key == "CODEX_HOME" || key == "CODEX_SQLITE_HOME") {
+		if !ok || value == "" {
+			continue
+		}
+		if key == "CODEX_HOME" {
+			if !filepath.IsAbs(value) || filepath.Clean(value) != filepath.Clean(home) {
+				return key
+			}
+			continue
+		}
+		if key == "CODEX_ACCESS_TOKEN" || key == "CODEX_API_KEY" || key == "OPENAI_API_KEY" || key == "CODEX_EXEC_SERVER_URL" {
 			return key
 		}
 	}
@@ -366,7 +394,7 @@ func resolveLiveCredential(ctx context.Context, rpc *RPC, cwd string, selected a
 			CredentialStore *string `json:"cliAuthCredentialsStore"`
 		} `json:"requirements"`
 	}
-	if err := rpc.Call(ctx, "configRequirements/read", map[string]any{}, &requirements); err != nil {
+	if err := rpc.Call(ctx, "configRequirements/read", nil, &requirements); err != nil {
 		return reply.Config, "", unknownCredential("effective config requirements are unavailable")
 	}
 	if reply.Config.CredentialStore != "file" {
@@ -405,7 +433,12 @@ func resolveLiveCredential(ctx context.Context, rpc *RPC, cwd string, selected a
 // resolved file-backed config; it does not claim the server exposed native IDs.
 func (i Inspector) VerifyFreshSelection(ctx context.Context, previous ProcessRecord, expected NativeSelection) (CredentialProof, error) {
 	if !expected.Identity.Known || expected.Identity.UserID == "" || expected.Identity.AccountID == "" || expected.Snapshot == "" {
-		return unknownCredential("expected native identity is incomplete"), errors.New("cannot verify an incomplete target identity")
+		if !(expected.Identity.Known && expected.Identity.UserID == "" && expected.Identity.AccountID == "" && expected.Snapshot != "") {
+			return unknownCredential("expected native identity is incomplete"), errors.New("cannot verify an incomplete target identity")
+		}
+	}
+	if !i.LaunchEnvKnown {
+		return unknownCredential("replacement launch environment was not supplied"), errors.New("replacement launch environment is unknown")
 	}
 	o, err := i.Inspect(ctx)
 	if err != nil {
@@ -433,7 +466,10 @@ func (i Inspector) VerifyFreshSelection(ctx context.Context, previous ProcessRec
 			continue
 		}
 		birth, birthErr := i.command(ctx, "ps", "-p", strconv.Itoa(previous.PID), "-o", "lstart=")
-		if birthErr == nil && normalSpace(string(birth)) == normalSpace(previous.StartTime) {
+		if birthErr != nil {
+			return unknownCredential("old process exit cannot be established"), errors.New("old process exit cannot be established")
+		}
+		if normalSpace(string(birth)) == normalSpace(previous.StartTime) {
 			return unknownCredential("old managed process is still running"), errors.New("old managed process is still running")
 		}
 	}

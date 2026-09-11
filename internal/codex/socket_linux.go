@@ -20,6 +20,10 @@ func (i Inspector) processCWD(ctx context.Context, pid int) (string, error) {
 	return filepath.Clean(string(bytes.TrimSpace(raw))), nil
 }
 
+func managedPreferencesPresent(context.Context, CommandRunner) (bool, error) {
+	return false, nil
+}
+
 func (i Inspector) ownsSocket(_ context.Context, pid int, socket string) (bool, error) {
 	raw, err := os.ReadFile("/proc/net/unix")
 	if err != nil {

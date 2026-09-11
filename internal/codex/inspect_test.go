@@ -80,10 +80,13 @@ func TestAlternativeAuthPresenceRefusesWithoutEchoingValue(t *testing.T) {
 	}
 }
 
-type fixedResolver struct{ result CredentialResolution }
+type fixedResolver struct {
+	result CredentialResolution
+	err    error
+}
 
 func (r fixedResolver) ResolveCredentialConfig(context.Context, CredentialResolveRequest) (CredentialResolution, error) {
-	return r.result, nil
+	return r.result, r.err
 }
 
 func TestStoppedCredentialProofRequiresCompleteResolverAndCWD(t *testing.T) {
@@ -95,9 +98,15 @@ func TestStoppedCredentialProofRequiresCompleteResolverAndCWD(t *testing.T) {
 		t.Fatalf("%+v %v", o, err)
 	}
 	i.CWD = t.TempDir()
-	i.Resolver = fixedResolver{CredentialResolution{EffectiveMode: "file", Basis: "synthetic-complete-stack", Snapshot: "snapshot"}}
+	i.LaunchEnvKnown = true
+	i.Resolver = fixedResolver{result: CredentialResolution{EffectiveMode: "file", Basis: "synthetic-complete-stack", Snapshot: "snapshot"}}
 	o, err = i.Inspect(context.Background())
 	if err != nil || o.Credential.Status != CredentialFileSelected || o.Credential.FileIdentity.AccountID != "account-a" {
+		t.Fatalf("%+v %v", o, err)
+	}
+	i.Resolver = fixedResolver{err: resolutionError("logged-in stopped runtime may receive an unobservable enterprise cloud config")}
+	o, err = i.Inspect(context.Background())
+	if err != nil || o.Credential.Reason != "logged-in stopped runtime may receive an unobservable enterprise cloud config" {
 		t.Fatalf("%+v %v", o, err)
 	}
 }
@@ -183,6 +192,10 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 				}
 				reply = map[string]any{"config": Config{CredentialStore: "file", ModelProvider: "openai"}, "layers": layers}
 			case "configRequirements/read":
+				if string(req.Params) != "null" {
+					t.Errorf("configRequirements/read params = %s", req.Params)
+					return
+				}
 				reply = map[string]any{"requirements": map[string]any{"cliAuthCredentialsStore": "file"}}
 			case "account/read", "getAuthStatus":
 				t.Errorf("unsafe identity RPC called: %s", req.Method)
@@ -240,6 +253,7 @@ func TestMissingLayerEvidenceDoesNotHideRunningState(t *testing.T) {
 
 func TestFreshSelectionRequiresNativeWorkspaceIDsAndNewProcess(t *testing.T) {
 	i, _ := managedFixture(t, "idle")
+	i.LaunchEnvKnown = true
 	expected, selectionErr := ReadNativeSelection(i.Home)
 	if selectionErr != nil {
 		t.Fatal(selectionErr)
@@ -261,6 +275,56 @@ func TestFreshSelectionRequiresNativeWorkspaceIDsAndNewProcess(t *testing.T) {
 	proof, err = i.VerifyFreshSelection(context.Background(), *o.Record, expected)
 	if err == nil || proof.Status != CredentialUnknown {
 		t.Fatalf("%+v %v", proof, err)
+	}
+}
+
+func TestFreshSelectionSupportsLoggedOutRollback(t *testing.T) {
+	i, _ := managedFixture(t, "idle")
+	i.LaunchEnvKnown = true
+	if err := os.Remove(filepath.Join(i.Home, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ReadNativeSelection(i.Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := i.VerifyFreshSelection(context.Background(), ProcessRecord{PID: 999999, StartTime: "old birth"}, expected)
+	if err != nil || proof.Status != CredentialFreshProcess || proof.FileIdentity.UserID != "" || !proof.FileIdentity.Known {
+		t.Fatalf("%+v %v", proof, err)
+	}
+}
+
+func TestFreshSelectionFailsClosedWhenOldBirthCannotBeRead(t *testing.T) {
+	i, _ := managedFixture(t, "idle")
+	i.LaunchEnvKnown = true
+	expected, err := ReadNativeSelection(i.Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := i.Run
+	i.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "ps" && len(args) >= 2 && args[0] == "-p" && args[1] == "4242" {
+			return nil, errors.New("gone or unreadable")
+		}
+		if name == "ps" && len(args) > 1 && args[0] == "-u" {
+			current, callErr := run(ctx, name, args...)
+			return append(current, []byte("4242 /bin/codex app-server\n")...), callErr
+		}
+		return run(ctx, name, args...)
+	}
+	proof, err := i.VerifyFreshSelection(context.Background(), ProcessRecord{PID: 4242, StartTime: "old birth"}, expected)
+	if err == nil || proof.Status != CredentialUnknown {
+		t.Fatalf("%+v %v", proof, err)
+	}
+}
+
+func TestCredentialOverrideAllowsSelectedHomeAndSQLiteLocation(t *testing.T) {
+	home := t.TempDir()
+	if key := credentialOverride([]string{"CODEX_HOME=" + home, "CODEX_SQLITE_HOME=/tmp/state"}, home); key != "" {
+		t.Fatalf("unexpected override %q", key)
+	}
+	if key := credentialOverride([]string{"CODEX_HOME=/different"}, home); key != "CODEX_HOME" {
+		t.Fatalf("override = %q", key)
 	}
 }
 func TestReusedPIDRefuses(t *testing.T) {

@@ -23,6 +23,8 @@ type Client interface {
 type Entry struct {
 	Quota         *auth.Quota `json:"quota,omitempty"`
 	CheckedAt     time.Time   `json:"checked_at"`
+	AttemptedAt   time.Time   `json:"attempted_at"`
+	Stale         bool        `json:"stale"`
 	LoginRequired bool        `json:"login_required,omitempty"`
 	Warning       string      `json:"warning,omitempty"`
 }
@@ -49,6 +51,9 @@ func (s Service) now() time.Time {
 func (s Service) Cached(id string) (Entry, bool, error) {
 	all, err := s.readCache()
 	e, ok := all[id]
+	if ok && e.Quota != nil && (s.now().Sub(e.CheckedAt) >= time.Minute || s.now().Before(e.CheckedAt)) {
+		e.Stale = true
+	}
 	return e, ok, err
 }
 
@@ -81,18 +86,19 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 		return Entry{}, err
 	}
 	previous := entries[account.ID]
-	age := s.now().Sub(previous.CheckedAt)
-	if !force && !previous.CheckedAt.IsZero() && age >= 0 && age < time.Minute {
+	age := s.now().Sub(previous.AttemptedAt)
+	if !force && !previous.AttemptedAt.IsZero() && age >= 0 && age < time.Minute {
 		return previous, nil
 	}
 	e := previous
-	e.CheckedAt = s.now()
+	e.AttemptedAt = s.now()
 	e.Warning = ""
 	e.LoginRequired = false
 	var q auth.Quota
-	active := s.Active.Known && s.Active.UserID == account.UserID && s.Active.AccountID == account.AccountID
+	known := s.Active.Known && ((s.Active.UserID == "") == (s.Active.AccountID == ""))
+	active := known && s.Active.UserID == account.UserID && s.Active.AccountID == account.AccountID
 	switch {
-	case !s.Active.Known:
+	case !known:
 		err = errors.New("selected account is unknown; credential refresh skipped")
 	case active:
 		if s.ActiveUsage == nil {
@@ -105,14 +111,17 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 	}
 	if err == nil {
 		e.Quota = &q
+		e.CheckedAt = s.now()
+		e.Stale = false
 	} else {
+		e.Stale = e.Quota != nil
 		// Only package-owned, sanitized classifications enter persistent metadata.
 		e.Warning = "quota unavailable; previous observation may be stale"
 		if errors.Is(err, auth.ErrLoginRequired) || errors.Is(err, auth.ErrInvalidAuth) {
 			e.LoginRequired = true
 			e.Warning = "reauthentication needed"
 		}
-		if !s.Active.Known {
+		if !known {
 			e.Warning = "selected account unknown; credential refresh skipped"
 		}
 		if active && s.ActiveUsage == nil {

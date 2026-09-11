@@ -118,3 +118,33 @@ func TestFailureRetainsStaleQuotaAndLoginRequired(t *testing.T) {
 		t.Fatalf("%+v %v", next, err)
 	}
 }
+
+func TestPartialActiveIdentityNeverRefreshes(t *testing.T) {
+	for _, identity := range []accounts.ActiveIdentity{{Known: true, UserID: "u"}, {Known: true, AccountID: "a"}} {
+		s, f, acc := fixture(t)
+		s.Active = identity
+		e, err := s.Refresh(context.Background(), acc.ID, true)
+		if err != nil || f.refreshes != 0 || f.usages != 0 || e.Warning == "" {
+			t.Fatalf("%+v %v %+v", e, err, f)
+		}
+	}
+}
+
+func TestFailedFetchPreservesSuccessTimeAndMarksStale(t *testing.T) {
+	s, f, acc := fixture(t)
+	first, err := s.Refresh(context.Background(), acc.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := s.now().Add(2 * time.Minute)
+	s.Now = func() time.Time { return later }
+	f.usageErr = auth.ErrNetwork
+	next, err := s.Refresh(context.Background(), acc.ID, true)
+	if err != nil || !next.Stale || !next.CheckedAt.Equal(first.CheckedAt) || !next.AttemptedAt.Equal(later) {
+		t.Fatalf("%+v %v", next, err)
+	}
+	cached, _, err := s.Cached(acc.ID)
+	if err != nil || !cached.Stale || !cached.CheckedAt.Equal(first.CheckedAt) {
+		t.Fatalf("%+v %v", cached, err)
+	}
+}

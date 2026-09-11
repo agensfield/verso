@@ -14,6 +14,7 @@ import (
 
 	"github.com/agensfield/verso/internal/accounts"
 	"github.com/agensfield/verso/internal/auth"
+	"github.com/agensfield/verso/internal/buildinfo"
 	"github.com/agensfield/verso/internal/codex"
 	"github.com/agensfield/verso/internal/herdr"
 	"github.com/agensfield/verso/internal/operation"
@@ -70,6 +71,7 @@ Usage: verso [options] <command>
   preview <account>     Read-only switch preview for humans and agents
   recovery              Read unfinished-switch and Herdr recovery metadata
   update [--check]      Update a known binary/Go install; defer Homebrew to brew
+  licenses              Print the license and dependency notices
   version               Print the build version
 
 Options:
@@ -129,6 +131,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if command == "help" {
 		_, _ = fmt.Fprint(a.Out, usage)
 		return 0
+	}
+	if command == "licenses" && len(pos) == 0 {
+		return a.finish(response{Command: command, Message: buildinfo.Licenses}, nil)
 	}
 	if command == "version" && len(pos) == 0 {
 		return a.finish(response{Command: command, Message: a.Version}, nil)

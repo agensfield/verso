@@ -15,8 +15,8 @@ import (
 
 // NewLocalCredentialResolver proves the small stopped-runtime configuration
 // subset that can be established without starting Codex or contacting a server.
-// A logged-in selection is intentionally refused because its enterprise cloud
-// bundle does not exist on disk and may change the final startup config.
+// The result is local-file-mode, not effective-runtime proof: for a logged-in
+// selection, an enterprise cloud bundle remains unresolved until Codex reopens.
 func NewLocalCredentialResolver(run CommandRunner) CredentialResolver {
 	if run == nil {
 		run = RunCommand
@@ -32,10 +32,9 @@ type localCredentialResolver struct {
 }
 
 type localUserConfig struct {
-	CredentialStore string         `toml:"cli_auth_credentials_store"`
-	ModelProvider   string         `toml:"model_provider"`
-	Profile         string         `toml:"profile"`
-	Profiles        map[string]any `toml:"profiles"`
+	CredentialStore string `toml:"cli_auth_credentials_store"`
+	ModelProvider   string `toml:"model_provider"`
+	Profile         string `toml:"profile"`
 }
 
 func (r localCredentialResolver) ResolveCredentialConfig(ctx context.Context, req CredentialResolveRequest) (CredentialResolution, error) {
@@ -50,9 +49,6 @@ func (r localCredentialResolver) ResolveCredentialConfig(ctx context.Context, re
 	}
 	if override := commandConfigOverride(req.LaunchArgs); override != "" {
 		return CredentialResolution{}, resolutionError("launch arguments contain unsupported override " + override)
-	}
-	if req.Selection.UserID != "" || req.Selection.AccountID != "" {
-		return CredentialResolution{}, resolutionError("logged-in stopped runtime may receive an unobservable enterprise cloud config")
 	}
 
 	raw, err := readRegular(filepath.Join(req.Home, "config.toml"), 4<<20)
@@ -69,8 +65,8 @@ func (r localCredentialResolver) ResolveCredentialConfig(ctx context.Context, re
 	if user.ModelProvider != "" && user.ModelProvider != "openai" {
 		return CredentialResolution{}, resolutionError("user config selects a non-native model provider")
 	}
-	if user.Profile != "" || len(user.Profiles) != 0 {
-		return CredentialResolution{}, resolutionError("user config profiles require full Codex resolution")
+	if user.Profile != "" {
+		return CredentialResolution{}, resolutionError("selected user config profile requires full Codex resolution")
 	}
 
 	for _, path := range []string{
@@ -91,13 +87,21 @@ func (r localCredentialResolver) ResolveCredentialConfig(ctx context.Context, re
 	if err != nil {
 		return CredentialResolution{}, resolutionError("startup cwd cannot be canonicalized")
 	}
+	canonicalHome, err := filepath.EvalSymlinks(req.Home)
+	if err != nil {
+		return CredentialResolution{}, resolutionError("Codex home cannot be canonicalized")
+	}
+	userConfigPath := filepath.Clean(filepath.Join(canonicalHome, "config.toml"))
 	for dir := filepath.Clean(cwd); ; dir = filepath.Dir(dir) {
-		present, statErr := r.present(filepath.Join(dir, ".codex", "config.toml"))
-		if statErr != nil {
-			return CredentialResolution{}, resolutionError("project config presence is unknown")
-		}
-		if present {
-			return CredentialResolution{}, resolutionError("project config requires full Codex resolution")
+		projectConfigPath := filepath.Clean(filepath.Join(dir, ".codex", "config.toml"))
+		if projectConfigPath != userConfigPath {
+			present, statErr := r.present(projectConfigPath)
+			if statErr != nil {
+				return CredentialResolution{}, resolutionError("project config presence is unknown")
+			}
+			if present {
+				return CredentialResolution{}, resolutionError("project config requires full Codex resolution")
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -120,11 +124,16 @@ func (r localCredentialResolver) ResolveCredentialConfig(ctx context.Context, re
 	}
 
 	snapshotInput := strings.Join([]string{req.Home, cwd, user.CredentialStore, user.ModelProvider, fmt.Sprintf("%x", sha256.Sum256(raw))}, "\x00")
-	return CredentialResolution{
+	resolution := CredentialResolution{
+		Status:        CredentialLocalFile,
 		EffectiveMode: "file",
-		Basis:         "local-files-no-managed-sources-logged-out",
+		Basis:         "explicit-local-file-mode-no-known-local-overrides",
 		Snapshot:      fmt.Sprintf("%x", sha256.Sum256([]byte(snapshotInput))),
-	}, nil
+	}
+	if req.Selection.UserID != "" || req.Selection.AccountID != "" {
+		resolution.Warning = "enterprise cloud configuration remains unresolved until Codex is reopened"
+	}
+	return resolution, nil
 }
 
 func resolutionError(reason string) error { return &CredentialResolutionError{Reason: reason} }

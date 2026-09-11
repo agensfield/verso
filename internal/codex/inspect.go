@@ -36,6 +36,7 @@ type CredentialProof struct {
 	Status        string                  `json:"status"`
 	Basis         string                  `json:"basis,omitempty"`
 	Reason        string                  `json:"reason,omitempty"`
+	Warning       string                  `json:"warning,omitempty"`
 	EffectiveMode string                  `json:"effectiveMode,omitempty"`
 	StartupCWD    string                  `json:"startupCwd,omitempty"`
 	FileIdentity  accounts.ActiveIdentity `json:"fileIdentity"`
@@ -50,6 +51,7 @@ type NativeSelection struct {
 
 const (
 	CredentialUnknown      = "unknown"
+	CredentialLocalFile    = "local-file-mode"
 	CredentialFileSelected = "file-selected"
 	CredentialFreshProcess = "fresh-process"
 )
@@ -71,9 +73,11 @@ type CredentialResolveRequest struct {
 }
 
 type CredentialResolution struct {
+	Status        string
 	EffectiveMode string
 	Basis         string
 	Snapshot      string
+	Warning       string
 }
 
 // CredentialResolutionError carries a sanitized capability boundary suitable
@@ -293,9 +297,21 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 			} else if resolved.EffectiveMode != "file" || resolved.Basis == "" || resolved.Snapshot == "" {
 				o.Credential = unknownCredential("stopped runtime is not proven file-backed")
 			} else {
+				status := resolved.Status
+				if status == "" {
+					status = CredentialFileSelected
+				}
+				if status != CredentialLocalFile && status != CredentialFileSelected {
+					o.Credential = unknownCredential("stopped runtime resolver returned an unsupported proof status")
+					return o, nil
+				}
+				if status == CredentialLocalFile && (o.SelectedFile.UserID != "" || o.SelectedFile.AccountID != "") && resolved.Warning == "" {
+					o.Credential = unknownCredential("logged-in local file mode requires an unresolved cloud warning")
+					return o, nil
+				}
 				o.Config.CredentialStore = resolved.EffectiveMode
 				o.configSnapshot = resolved.Snapshot
-				o.Credential = CredentialProof{Status: CredentialFileSelected, Basis: resolved.Basis, EffectiveMode: resolved.EffectiveMode, StartupCWD: i.CWD, FileIdentity: o.SelectedFile}
+				o.Credential = CredentialProof{Status: status, Basis: resolved.Basis, Warning: resolved.Warning, EffectiveMode: resolved.EffectiveMode, StartupCWD: i.CWD, FileIdentity: o.SelectedFile}
 			}
 		}
 		return o, nil

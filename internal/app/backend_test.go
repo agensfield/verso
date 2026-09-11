@@ -174,7 +174,7 @@ func TestExternalIdentityChangeAfterSaveIsNotOverwritten(t *testing.T) {
 	}
 }
 func TestStatedVersionFloor(t *testing.T) {
-	for _, s := range []string{"codex-cli 0.152.0", "codex-cli 0.154.0", "1.0.0"} {
+	for _, s := range []string{"codex-cli 0.152.0", "codex-cli 0.154.0", "codex_app_server/0.154.0", "1.0.0"} {
 		if !SupportedVersion(s) {
 			t.Fatal(s)
 		}

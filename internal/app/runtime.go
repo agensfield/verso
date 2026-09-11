@@ -30,7 +30,11 @@ type NativeRuntime struct {
 }
 
 func (r *NativeRuntime) Inspect(ctx context.Context) (codex.Observation, error) {
-	return r.Inspector.Inspect(ctx)
+	o, err := r.Inspector.Inspect(ctx)
+	if err == nil && o.Daemon == switcher.Running && !SupportedVersion(o.Version) {
+		return o, errors.New("managed Codex version is unknown or below 0.152.0")
+	}
+	return o, err
 }
 func (r *NativeRuntime) Verify(ctx context.Context, old codex.ProcessRecord, target codex.NativeSelection) error {
 	_, err := r.Inspector.VerifyFreshSelection(ctx, old, target)
@@ -96,7 +100,7 @@ func (r *NativeRuntime) command(ctx context.Context, action, cwd string) error {
 	return nil
 }
 
-var nativeVersion = regexp.MustCompile(`(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:[-+][^\s]+)?(?:$|\s)`)
+var nativeVersion = regexp.MustCompile(`(?:^|[\s/])(\d+)\.(\d+)\.(\d+)(?:[-+][^\s]+)?(?:$|\s)`)
 
 func SupportedVersion(output string) bool {
 	m := nativeVersion.FindStringSubmatch(output)

@@ -167,8 +167,14 @@ func (b *Backend) PrepareTarget(ctx context.Context, target string) error {
 		if _, err = store.UpdateCredentials(account.ID, parsed); err != nil {
 			return err
 		}
-		_, err = service.Refresh(ctx, account.ID, true)
-		return err
+		after, fetchErr := service.Refresh(ctx, account.ID, true)
+		if fetchErr != nil {
+			return fetchErr
+		}
+		if after.LoginRequired {
+			return errors.New("target still requires login after reauthentication")
+		}
+		return nil
 	}
 	return nil
 }

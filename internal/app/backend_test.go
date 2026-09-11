@@ -185,3 +185,29 @@ func TestStatedVersionFloor(t *testing.T) {
 		}
 	}
 }
+
+type loginFailure struct{}
+
+func (loginFailure) Usage(context.Context, []byte) (auth.Quota, error) {
+	return auth.Quota{}, auth.ErrLoginRequired
+}
+func (loginFailure) Refresh(context.Context, []byte) ([]byte, error) {
+	return nil, auth.ErrLoginRequired
+}
+func TestUnsuccessfulReauthNeverStopsOutgoingRuntime(t *testing.T) {
+	b, r, target := backendFixture(t, true)
+	b.Auth = loginFailure{}
+	prompted := false
+	b.Reauthenticate = func(context.Context, accounts.Account) ([]byte, error) {
+		prompted = true
+		_, identity, _ := selection.Read(b.Home)
+		if !r.running || identity.AccountID != "a" {
+			t.Fatal("reauth happened after stop/activation")
+		}
+		return native("b"), nil
+	}
+	_, err := (switcher.Engine{Backend: b}).Execute(context.Background(), switcher.Request{Target: target.ID}, func(switcher.Plan) error { return nil })
+	if err == nil || !prompted || r.stops != 0 || !r.running {
+		t.Fatalf("%v %+v", err, r)
+	}
+}

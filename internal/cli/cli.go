@@ -17,6 +17,7 @@ import (
 	"github.com/agensfield/verso/internal/codex"
 	"github.com/agensfield/verso/internal/herdr"
 	"github.com/agensfield/verso/internal/operation"
+	"github.com/agensfield/verso/internal/quota"
 	"github.com/agensfield/verso/internal/switcher"
 )
 
@@ -37,23 +38,28 @@ type App struct {
 }
 
 type response struct {
-	Journal  *switcher.Checkpoint `json:"unfinished_switch,omitempty"`
-	Snapshot *herdr.Snapshot      `json:"herdr_snapshot,omitempty"`
-	Schema   string               `json:"schema"`
-	OK       bool                 `json:"ok"`
-	Command  string               `json:"command"`
-	Message  string               `json:"message,omitempty"`
-	Error    string               `json:"error,omitempty"`
-	Accounts []accounts.Account   `json:"accounts,omitempty"`
-	Runtime  *codex.Observation   `json:"runtime,omitempty"`
-	Target   *accounts.Account    `json:"target,omitempty"`
+	Plan     *switcher.Plan         `json:"plan,omitempty"`
+	Quotas   map[string]quota.Entry `json:"quotas,omitempty"`
+	Switch   *switcher.Result       `json:"switch_result,omitempty"`
+	Journal  *switcher.Checkpoint   `json:"unfinished_switch,omitempty"`
+	Snapshot *herdr.Snapshot        `json:"herdr_snapshot,omitempty"`
+	Schema   string                 `json:"schema"`
+	OK       bool                   `json:"ok"`
+	Command  string                 `json:"command"`
+	Message  string                 `json:"message,omitempty"`
+	Error    string                 `json:"error,omitempty"`
+	Accounts []accounts.Account     `json:"accounts,omitempty"`
+	Runtime  *codex.Observation     `json:"runtime,omitempty"`
+	Target   *accounts.Account      `json:"target,omitempty"`
 }
 
 const usage = `Verso — Codex account switching (alpha, under development)
 
 Usage: verso [options] <command>
 
+  switch [account]      Select an account with human approval
   add [alias]           Save an account using device authorization
+  quota [account]       Fetch quota on demand; --refresh bypasses recent cache
   list                  List saved accounts without refreshing credentials
   status                Inspect local native account/runtime metadata
   preview <account>     Read-only switch preview for humans and agents
@@ -65,8 +71,10 @@ Options:
   --state-dir PATH      Verso private state directory
   --codex-home PATH     Native Codex home (default CODEX_HOME or ~/.codex)
   --codex-bin PATH      Native Codex executable
+  --allow-exhausted      Explicitly allow a target with exhausted quota
+  --allow-no-snapshot    Allow switching if Herdr capture fails
 
-This development build does not yet execute account switches.
+Switches require an interactive human terminal. No agent --yes bypass.
 `
 
 func (a *App) Run(ctx context.Context, args []string) int {
@@ -87,6 +95,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	fs.StringVar(&a.Binary, "codex-bin", a.Binary, "")
 	version := fs.Bool("version", false, "")
 	shortVersion := fs.Bool("v", false, "")
+	refresh := fs.Bool("refresh", false, "")
+	allowExhausted := fs.Bool("allow-exhausted", false, "")
+	allowNoSnapshot := fs.Bool("allow-no-snapshot", false, "")
 	ordered, err := flagsFirst(fs, args)
 	if err == nil {
 		err = fs.Parse(ordered)
@@ -114,6 +125,12 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 	if command == "version" && len(pos) == 0 {
 		return a.finish(response{Command: command, Message: a.Version}, nil)
+	}
+	if command == "quota" {
+		return a.quotaCommand(ctx, pos, *refresh)
+	}
+	if command == "switch" {
+		return a.switchAccount(ctx, pos, *allowExhausted, *allowNoSnapshot)
 	}
 	if command == "add" {
 		return a.add(ctx, pos)
@@ -166,6 +183,14 @@ func (a *App) Run(ctx context.Context, args []string) int {
 			return a.finish(r, e)
 		}
 		r.Target = &target
+		backend, e := a.backend()
+		if e != nil {
+			return a.finish(r, e)
+		}
+		plan, e := (switcher.Engine{Backend: backend}).Preview(ctx, switcher.Request{Target: target.ID, AllowExhausted: *allowExhausted, AllowNoSnapshot: *allowNoSnapshot})
+		r.Plan = &plan
+		r.Message = "Preview only; no credentials were refreshed or activated."
+		return a.finish(r, e)
 	}
 	cwd := a.CWD
 	if cwd == "" {
@@ -180,18 +205,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if err != nil {
 		return a.finish(r, err)
 	}
-	if command == "preview" {
-		if o.Credential.Status != codex.CredentialFileSelected {
-			return a.finish(r, errors.New("native credential mode is not proven: "+o.Credential.Reason))
-		}
-		if o.Config.CredentialStore != "file" {
-			return a.finish(r, errors.New("explicit file-backed Codex credentials are required"))
-		}
-		if o.Daemon == "running" && len(o.Busy) > 0 {
-			return a.finish(r, errors.New("active turns block daemon restart"))
-		}
-		r.Message = "Preview only; credentials were not refreshed or activated. Quota is not yet available in this development build."
-	}
+
 	return a.finish(r, nil)
 }
 
@@ -211,6 +225,11 @@ func (a *App) finish(r response, err error) int {
 		if r.Message != "" {
 			_, _ = fmt.Fprintln(a.Out, r.Message)
 		}
+		if r.Command == "quota" {
+			for _, account := range r.Accounts {
+				_, _ = fmt.Fprintf(a.Out, "%q: %s\n", account.Alias, quotaText(r.Quotas[account.ID]))
+			}
+		}
 		if r.Command == "list" {
 			if len(r.Accounts) == 0 {
 				_, _ = fmt.Fprintln(a.Out, "No accounts saved.")
@@ -221,6 +240,22 @@ func (a *App) finish(r response, err error) int {
 		}
 		if r.Journal != nil {
 			_, _ = fmt.Fprintf(a.Out, "Phase: %s\nPrevious: %q\nRequested: %q\n", r.Journal.Phase, r.Journal.From, r.Journal.Target)
+		}
+		if r.Switch != nil && r.Switch.RollbackAttempted {
+			if r.Switch.RollbackSucceeded {
+				_, _ = fmt.Fprintln(a.Out, "Rollback: previous account restored and verified.")
+			} else {
+				_, _ = fmt.Fprintln(a.Out, "Rollback: incomplete; inspect verso recovery before further changes.")
+			}
+		}
+		if r.Plan != nil {
+			_, _ = fmt.Fprintf(a.Out, "Daemon: %s\n", r.Plan.Daemon)
+			for _, id := range r.Plan.Busy {
+				_, _ = fmt.Fprintf(a.Out, "Blocking turn: %q\n", id)
+			}
+			for _, warning := range r.Plan.Warnings {
+				_, _ = fmt.Fprintln(a.Out, "Warning:", warning)
+			}
 		}
 		if r.Runtime != nil {
 			_, _ = fmt.Fprintf(a.Out, "Daemon: %s\nCredential mode: %s\nSelected file identity: %q\n", r.Runtime.Daemon, r.Runtime.Config.CredentialStore, r.Runtime.Email)

@@ -15,7 +15,7 @@ func TestAgentSwitchGuardAndNoPipedApproval(t *testing.T) {
 	}
 	for _, key := range []string{"CODEX_THREAD_ID", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CLAUDECODE"} {
 		a.Env = []string{key + "=present"}
-		if err := a.requireHuman(); err == nil || !strings.Contains(err.Error(), "agents may preview") {
+		if err := a.requireHuman(); err == nil || !strings.Contains(err.Error(), "run this switch directly") {
 			t.Fatal(err)
 		}
 	}

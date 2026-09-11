@@ -41,6 +41,8 @@ type App struct {
 }
 
 type response struct {
+	Active   string                 `json:"active_account_id,omitempty"`
+	Cached   bool                   `json:"cached,omitempty"`
 	Update   *updater.Result        `json:"update,omitempty"`
 	Plan     *switcher.Plan         `json:"plan,omitempty"`
 	Quotas   map[string]quota.Entry `json:"quotas,omitempty"`
@@ -57,32 +59,19 @@ type response struct {
 	Target   *accounts.Account      `json:"target,omitempty"`
 }
 
-const usage = `Verso: Codex account switching (alpha, under development)
+const usage = `Verso: switch Codex accounts
 
-Usage: verso [options] <command>
+Usage: verso <command>
 
-  switch [account]      Select an account with human approval
-  import [alias]        Save the current native Codex login
-  remove <account>      Delete an inactive saved account
-  add [alias]           Save an account using device authorization
-  quota [account]       Fetch quota on demand; --refresh bypasses recent cache
-  list                  List saved accounts without refreshing credentials
-  status                Inspect local native account/runtime metadata
-  preview <account>     Read-only switch preview for humans and agents
-  recovery              Read unfinished-switch and Herdr recovery metadata
-  update [--check]      Update a known binary/Go install; defer Homebrew to brew
-  licenses              Print the license and dependency notices
-  version               Print the build version
+  list [account]        Accounts and usage
+  switch [account]      Switch accounts
+  add [alias]           Add an account
+  import [alias]        Save your current login
+  remove <account>      Remove a saved account
+  preview <account>     Check before switching
 
-Options:
-  --json                Machine-readable output
-  --state-dir PATH      Verso private state directory
-  --codex-home PATH     Native Codex home (default CODEX_HOME or ~/.codex)
-  --codex-bin PATH      Native Codex executable
-  --allow-exhausted      Explicitly allow a target with exhausted quota
-  --allow-no-snapshot    Allow switching if Herdr capture fails
-
-Switches require an interactive human terminal. No agent --yes bypass.
+More: status, recovery, update, version, licenses
+Help: verso help <command>     Agent guide: verso --skill
 `
 
 func (a *App) Run(ctx context.Context, args []string) int {
@@ -101,9 +90,10 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	fs.StringVar(&a.StateDir, "state-dir", a.StateDir, "")
 	fs.StringVar(&a.CodexHome, "codex-home", a.CodexHome, "")
 	fs.StringVar(&a.Binary, "codex-bin", a.Binary, "")
+	skill := fs.Bool("skill", false, "")
 	version := fs.Bool("version", false, "")
 	shortVersion := fs.Bool("v", false, "")
-	refresh := fs.Bool("refresh", false, "")
+	cached := fs.Bool("cached", false, "")
 	checkUpdate := fs.Bool("check", false, "")
 	allowExhausted := fs.Bool("allow-exhausted", false, "")
 	allowNoSnapshot := fs.Bool("allow-no-snapshot", false, "")
@@ -112,13 +102,21 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = fs.Parse(ordered)
 	}
 	if errors.Is(err, flag.ErrHelp) {
-		_, _ = fmt.Fprint(a.Out, usage)
-		return 0
+		return a.printHelp(helpTopic(ordered))
 	}
 	if err != nil {
 		return a.finish(response{Command: "usage"}, errors.New("invalid arguments; see verso --help"))
 	}
+	if *skill {
+		if len(fs.Args()) != 0 || *version || *shortVersion || *cached || *checkUpdate || *allowExhausted || *allowNoSnapshot {
+			return a.finish(response{Command: "skill"}, errors.New("use verso --skill without a command"))
+		}
+		return a.finish(response{Command: "skill", Message: agentGuide}, nil)
+	}
 	if *version || *shortVersion {
+		if len(fs.Args()) != 0 {
+			return a.finish(response{Command: "version"}, errors.New("use --version without a command"))
+		}
 		return a.finish(response{Command: "version", Message: a.Version}, nil)
 	}
 	pos := fs.Args()
@@ -129,8 +127,20 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	command := pos[0]
 	pos = pos[1:]
 	if command == "help" {
-		_, _ = fmt.Fprint(a.Out, usage)
-		return 0
+		if len(pos) > 1 {
+			return a.finish(response{Command: "help"}, errors.New("usage: verso help [command|options]"))
+		}
+		topic := ""
+		if len(pos) == 1 {
+			topic = pos[0]
+		}
+		return a.printHelp(topic)
+	}
+	if command == "skill" {
+		if len(pos) != 0 || *cached || *checkUpdate || *allowExhausted || *allowNoSnapshot {
+			return a.finish(response{Command: command}, errors.New("usage: verso skill"))
+		}
+		return a.finish(response{Command: command, Message: agentGuide}, nil)
 	}
 	if command == "licenses" && len(pos) == 0 {
 		return a.finish(response{Command: command, Message: buildinfo.Licenses}, nil)
@@ -141,8 +151,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if command == "update" {
 		return a.updateCommand(ctx, pos, *checkUpdate)
 	}
-	if command == "quota" {
-		return a.quotaCommand(ctx, pos, *refresh)
+	if command == "list" {
+		return a.listCommand(ctx, pos, *cached)
 	}
 	if command == "switch" {
 		return a.switchAccount(ctx, pos, *allowExhausted, *allowNoSnapshot)
@@ -153,7 +163,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if command == "add" {
 		return a.add(ctx, pos)
 	}
-	if command != "recovery" && command != "list" && command != "status" && command != "preview" {
+	if command != "recovery" && command != "status" && command != "preview" {
 		return a.finish(response{Command: command}, errors.New("unknown command; see verso --help"))
 	}
 	if (command == "preview" && len(pos) != 1) || (command != "preview" && len(pos) != 0) {
@@ -192,9 +202,6 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return a.finish(response{Command: command}, err)
 	}
 	r := response{Command: command, Accounts: saved}
-	if command == "list" {
-		return a.finish(r, nil)
-	}
 	if command == "preview" {
 		target, e := store.Find(pos[0])
 		if e != nil {
@@ -239,17 +246,10 @@ func (a *App) finish(r response, err error) int {
 		if r.Message != "" {
 			_, _ = fmt.Fprintln(a.Out, r.Message)
 		}
-		if r.Command == "quota" {
-			for _, account := range r.Accounts {
-				_, _ = fmt.Fprintf(a.Out, "%q: %s\n", account.Alias, quotaText(r.Quotas[account.ID]))
-			}
-		}
-		if r.Command == "list" {
-			if len(r.Accounts) == 0 {
-				_, _ = fmt.Fprintln(a.Out, "No accounts saved.")
-			}
-			for _, account := range r.Accounts {
-				_, _ = fmt.Fprintf(a.Out, "%s  %q  %q  workspace=%q\n", account.ID, account.Alias, account.Email, account.AccountID)
+		if r.Command == "list" && len(r.Accounts) > 0 {
+			if renderErr := a.renderAccounts(r); renderErr != nil {
+				_, _ = fmt.Fprintln(a.Err, "verso:", renderErr)
+				return 1
 			}
 		}
 		if r.Journal != nil {
@@ -263,25 +263,25 @@ func (a *App) finish(r response, err error) int {
 			}
 		}
 		if r.Plan != nil {
-			_, _ = fmt.Fprintf(a.Out, "Daemon: %s\n", r.Plan.Daemon)
-			for _, id := range r.Plan.Busy {
-				_, _ = fmt.Fprintf(a.Out, "Blocking turn: %q\n", id)
+			_, _ = fmt.Fprintf(a.Out, "%s %s\n", a.humanHeading("Codex:"), r.Plan.Daemon)
+			if len(r.Plan.Busy) > 0 {
+				_, _ = fmt.Fprintf(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Plan.Busy))
 			}
 			for _, warning := range r.Plan.Warnings {
-				_, _ = fmt.Fprintln(a.Out, "Warning:", warning)
+				_, _ = fmt.Fprintln(a.Out, a.humanHeading("Warning:"), warning)
 			}
 		}
 		if r.Runtime != nil {
-			_, _ = fmt.Fprintf(a.Out, "Daemon: %s\nCredential mode: %s\nSelected file identity: %q\n", r.Runtime.Daemon, r.Runtime.Config.CredentialStore, r.Runtime.Email)
-			for _, thread := range r.Runtime.Busy {
-				_, _ = fmt.Fprintf(a.Out, "Blocking turn: %s\n", thread)
+			_, _ = fmt.Fprintf(a.Out, "%s %s\n%s %s\n%s %s\n", a.humanHeading("Codex:"), r.Runtime.Daemon, a.humanHeading("Credentials:"), r.Runtime.Config.CredentialStore, a.humanHeading("Account:"), selectedAccountName(r))
+			if len(r.Runtime.Busy) > 0 {
+				_, _ = fmt.Fprintf(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Runtime.Busy))
 			}
 			for _, warning := range r.Runtime.Warnings {
-				_, _ = fmt.Fprintf(a.Out, "Warning: %s\n", warning)
+				_, _ = fmt.Fprintf(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
 			}
 		}
 		if r.Target != nil {
-			_, _ = fmt.Fprintf(a.Out, "Target: %q (%q)\n", r.Target.Alias, r.Target.Email)
+			_, _ = fmt.Fprintf(a.Out, "%s %s\n", a.humanHeading("Account:"), accountChoiceName(*r.Target))
 		}
 		if err != nil {
 			_, _ = fmt.Fprintln(a.Err, "verso:", r.Error)

@@ -121,12 +121,20 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		if len(saved) == 0 {
 			return a.finish(r, errors.New("no saved accounts; run verso add first"))
 		}
-		entries, err := a.fetchQuotas(ctx, saved, false)
+		entries, active, err := a.fetchQuotas(ctx, saved, false)
 		if err != nil {
 			return a.finish(r, err)
 		}
+		saved, err = store.List()
+		if err != nil {
+			return a.finish(r, err)
+		}
+		if err := a.renderAccounts(response{Accounts: saved, Quotas: entries, Active: active}); err != nil {
+			return a.finish(r, err)
+		}
+		_, _ = fmt.Fprintln(a.Out, a.humanHeading("Choose account"))
 		for n, account := range saved {
-			_, _ = fmt.Fprintf(a.Out, "%d. %q (%q, workspace %q): %s\n", n+1, account.Alias, account.Email, account.AccountID, quotaText(entries[account.ID]))
+			_, _ = fmt.Fprintf(a.Out, "  %d  %s\n", n+1, accountChoiceName(account))
 		}
 		_, _ = fmt.Fprint(a.Out, "Account number (empty cancels): ")
 		scanner := bufio.NewScanner(a.In)

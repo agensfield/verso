@@ -21,7 +21,6 @@ type Config struct {
 	CredentialStore string `toml:"cli_auth_credentials_store" json:"cli_auth_credentials_store"`
 	ModelProvider   string `toml:"model_provider" json:"model_provider"`
 	SQLiteHome      string `toml:"sqlite_home" json:"sqlite_home"`
-	ForcedWorkspace string `toml:"forced_chatgpt_workspace_id" json:"forced_chatgpt_workspace_id"`
 }
 
 type Process struct {
@@ -147,14 +146,18 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	servers := 0
 	for _, p := range processes {
 		fields := strings.Fields(p.Command)
-		if len(fields) == 0 || filepath.Base(fields[0]) != "codex" {
+		if len(fields) == 0 || !i.isCodex(fields[0]) {
 			continue
 		}
 		if len(fields) > 1 && fields[1] == "app-server" {
 			if len(fields) > 2 && (fields[2] == "daemon" || fields[2] == "proxy" || strings.HasPrefix(fields[2], "generate-")) {
 				continue
 			}
-			servers++
+			if privateServer(fields[2:]) {
+				o.Warnings = append(o.Warnings, fmt.Sprintf("private Codex app-server %d must be restarted after switching", p.PID))
+			} else {
+				servers++
+			}
 			continue
 		}
 		if !explicitRemote(fields, i.Socket()) {
@@ -181,7 +184,7 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 					return o, errors.New("daemon PID record does not match process birth identity")
 				}
 				fields := strings.Fields(p.Command)
-				if len(fields) < 2 || filepath.Base(fields[0]) != "codex" || fields[1] != "app-server" {
+				if len(fields) < 2 || !i.isCodex(fields[0]) || fields[1] != "app-server" {
 					return o, errors.New("managed PID is not a recognized Codex server")
 				}
 				alive = true
@@ -241,6 +244,9 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	busy, err := loadedBusy(ctx, rpc)
 	if err != nil {
 		return o, err
+	}
+	if servers > 1 {
+		o.Warnings = append(o.Warnings, "additional app-server endpoints may retain previous credentials; restart them after switching")
 	}
 	o.Daemon, o.Record, o.Busy, o.Version = switcher.Running, record, busy, rpc.Info.UserAgent
 	o.Warnings = append(o.Warnings, "background activity is not completely observable; native shutdown may interrupt it")
@@ -344,4 +350,25 @@ func loadedBusy(ctx context.Context, rpc *RPC) ([]string, error) {
 		seen[cursor] = true
 	}
 	return nil, errors.New("loaded thread inventory exceeded safety limit")
+}
+
+// ps command text is only a discovery hint; managed ownership additionally needs
+// the recorded birth identity and socket correlation.
+func (i Inspector) isCodex(executable string) bool {
+	if filepath.Base(executable) == "codex" {
+		return true
+	}
+	return i.Binary != "" && filepath.Base(executable) == filepath.Base(i.Binary)
+}
+
+func privateServer(args []string) bool {
+	for n, arg := range args {
+		if arg == "--listen" {
+			return n+1 < len(args) && args[n+1] == "stdio://"
+		}
+		if strings.HasPrefix(arg, "--listen=") {
+			return arg == "--listen=stdio://"
+		}
+	}
+	return true // The native default is stdio, including explicit --stdio.
 }

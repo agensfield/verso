@@ -193,3 +193,42 @@ func TestReusedPIDRefuses(t *testing.T) {
 		t.Fatalf("%+v %v", o, err)
 	}
 }
+
+func TestCustomBinaryAndPrivateServers(t *testing.T) {
+	for _, tc := range []struct {
+		command  string
+		unknown  bool
+		warnings int
+	}{
+		{"/opt/codex-next app-server --listen unix://", true, 0},
+		{"/opt/codex-next app-server", false, 1},
+		{"/opt/codex-next app-server --listen=stdio://", false, 1},
+		{"/opt/codex-next app-server proxy", false, 0},
+		{"/opt/codex-next resume abc", false, 1},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			home := t.TempDir()
+			testNativeAuth(t, home)
+			i := Inspector{Home: home, Binary: "/opt/codex-next", Run: func(context.Context, string, ...string) ([]byte, error) {
+				return []byte("1234 " + tc.command + "\n"), nil
+			}}
+			o, err := i.Inspect(context.Background())
+			if (err != nil) != tc.unknown || len(o.Warnings) != tc.warnings {
+				t.Fatalf("%+v %v", o, err)
+			}
+		})
+	}
+}
+
+func TestConfigWorkspaceUnionDoesNotBreakInspection(t *testing.T) {
+	for _, value := range []string{`"workspace-a"`, `["workspace-a", "workspace-b"]`} {
+		home := t.TempDir()
+		raw := "cli_auth_credentials_store = \"file\"\nforced_chatgpt_workspace_id = " + value + "\n"
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if cfg, err := ReadConfig(home); err != nil || cfg.CredentialStore != "file" {
+			t.Fatalf("%+v %v", cfg, err)
+		}
+	}
+}

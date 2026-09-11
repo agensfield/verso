@@ -3,6 +3,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -10,6 +11,14 @@ import (
 	"strconv"
 	"strings"
 )
+
+func (i Inspector) processCWD(ctx context.Context, pid int) (string, error) {
+	raw, err := i.command(ctx, "readlink", filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
+	if err != nil {
+		return "", errors.New("cannot inspect process cwd")
+	}
+	return filepath.Clean(string(bytes.TrimSpace(raw))), nil
+}
 
 func (i Inspector) ownsSocket(_ context.Context, pid int, socket string) (bool, error) {
 	raw, err := os.ReadFile("/proc/net/unix")

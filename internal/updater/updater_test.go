@@ -66,7 +66,7 @@ func TestUpdateReplacesResolvedExecutable(t *testing.T) {
 	if string(got) != "new binary" {
 		t.Fatalf("binary = %q", got)
 	}
-	if resolved, _ := filepath.EvalSymlinks(linkPath); resolved != realPath {
+	if resolved, _ := os.Readlink(linkPath); resolved != realPath {
 		t.Fatalf("symlink target changed to %q", resolved)
 	}
 }

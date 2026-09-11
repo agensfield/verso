@@ -18,7 +18,7 @@ var ErrChanged = errors.New("native credential identity changed; re-inspect befo
 // Read refuses links, oversized files, foreign owners, and exposed credentials.
 // Missing auth is a known logged-out state; other modes are not treated as logout.
 func Read(home string) ([]byte, accounts.ActiveIdentity, error) {
-	f, err := os.OpenFile(filepath.Join(home, "auth.json"), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(filepath.Join(home, "auth.json"), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, accounts.ActiveIdentity{Known: true}, nil
 	}

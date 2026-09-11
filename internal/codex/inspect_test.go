@@ -158,6 +158,11 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 	}
 	i.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name == "/usr/sbin/lsof" {
+			for _, arg := range args {
+				if arg == "cwd" {
+					return []byte("p" + strconv.Itoa(pid) + "\nn" + home + "\n"), nil
+				}
+			}
 			return []byte("p" + strconv.Itoa(pid) + "\nn" + i.Socket() + "\n"), nil
 		}
 		for _, arg := range args {

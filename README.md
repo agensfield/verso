@@ -1,32 +1,129 @@
 # Verso
 
-A small account switcher for Codex. **Alpha, under development.**
+One Codex home. A few accounts. A deliberate switch.
 
-Verso keeps one native Codex working environment and changes its selected account.
-It supports local macOS/Linux, central app-server and standalone TUI setups.
-Codex 0.152.0+ is the best-effort alpha floor; compatibility follows the version
-used by the maintainer and may change with upstream.
+Verso is a small Go CLI for switching Codex accounts while keeping native history,
+memories, tools, skills, and plugins in place. **This is alpha software**, built
+around the maintainer's daily workflow. macOS and Linux are supported; Codex
+**0.152.0+** is the best-effort floor. The implementation currently tracks 0.154.0,
+and compatibility can change with upstream.
 
-The first alpha is being built. No release is ready yet.
+## Install
 
-## Contract
+```sh
+brew install agensfield/tap/verso
+```
 
-- Direct device login and current-login import; explicit file-backed credentials.
-- Human-executed switches. Agents prepare previews, never restart their own runtime.
-- Busy central turns block; unknown daemon state refuses. Background work and
-  standalone TUIs warn. Existing standalone clients may keep old auth until reopened.
-- No automatic account fallback or per-thread affinity.
-- Target startup/identity failure attempts rollback; client reconnect failure does not.
-- One private Herdr snapshot, no automatic restoration.
-- No resident service, scheduler, inference warm-ups or legacy account migration.
+Or download an archive for your OS/architecture from
+[GitHub Releases](https://github.com/agensfield/verso/releases), verify it against
+`checksums.txt`, and put `verso` on your `PATH`.
+
+```sh
+go install github.com/agensfield/verso/cmd/verso@latest
+```
+
+`verso update` updates a known release-binary or Go installation in place.
+Homebrew installations use `brew upgrade verso`. Unknown local builds refuse
+self-update. `verso update --check` checks without replacing the executable.
+
+## Add accounts
+
+Verso supports native ChatGPT credentials stored in a file. The local Codex
+configuration should explicitly select:
+
+```toml
+cli_auth_credentials_store = "file"
+```
+
+Verso does not silently change this setting or migrate keyring/auto credentials.
+
+```sh
+verso import personal    # Save the current native Codex login
+verso add work           # Device authorization directly into Verso's store
+verso list
+verso quota             # Fetch stale quota on demand
+```
+
+Aliases are optional and default to email. Email is not a unique identity across
+workspaces; use an alias or the displayed saved-account ID when lookup is ambiguous.
+Adding an account does not activate it. Expired inactive credentials refresh
+silently when quota is fetched. Codex retains ownership of active-account refresh;
+failed active quota reads stay unknown. There is no resident service or scheduler.
+
+## Switch
+
+```sh
+verso preview work       # Read-only: useful for humans and agents
+verso switch work        # Human terminal, explicit approval
+verso switch            # Account picker with quota and reset times
+```
+
+With a managed daemon, Verso checks visible turns, captures Herdr recovery metadata
+when available, stops the daemon, saves the outgoing credentials, installs the
+target, restarts, and verifies fresh-process/file/config evidence. Failed target
+startup or verification attempts rollback, with its outcome reported separately.
+Client reconnect failures do not undo a successful switch.
+
+Without a daemon, Verso updates the credential file and tells you to close and
+reopen Codex. Explicit local file mode is sufficient in this alpha, with a warning
+that account-managed configuration fetched on startup may override it. Known local
+configuration conflicts still refuse. Open standalone TUIs are advisory, including
+mixed setups; they may retain the old account until reopened.
+
+- Busy visible turns block immediately, including approval/input waits.
+- Unknown or unreachable daemon state refuses; it is not treated as absence.
+- Background memory/Chronicle activity is not completely observable. Warnings
+  do not claim idleness or guaranteed self-healing. Native shutdown can interrupt
+  background work and can escalate after its timeout.
+- Known exhausted quota blocks unless you pass `--allow-exhausted`. Unknown quota
+  warns and allows proceeding. There is no automatic fallback to another account.
+- Herdr capture failure blocks unless you pass `--allow-no-snapshot`. No Herdr
+  means no snapshot. One private checkpoint replaces the previous successful one.
+- Agents may preview. Switch execution requires a human terminal; there is no
+  `--yes`, force-cancel, delayed switch, or automatic restoration.
+
+Visible-idle checks and selection rereads are snapshots. Verso's lock serializes
+Verso processes, not Codex or other credential writers. Do not concurrently change
+accounts through another tool. Fresh-process verification does not claim that
+Codex exposes the full account identity over RPC.
+
+## Inspect and recover
+
+```sh
+verso status
+verso recovery --json
+verso remove old-account
+```
+
+Recovery reports an unfinished transaction and the latest Herdr metadata. It does
+not replay a switch or reconstruct panes. Inspect the current account/runtime
+before manual recovery, and check for existing clients before recreating them.
+Removing the selected account is refused; inactive removal deletes only Verso's copy.
+
+Private state defaults to `~/.local/share/verso` (`VERSO_HOME` or `--state-dir`).
+Native home follows `CODEX_HOME`, or `~/.codex` (`--codex-home`). `--codex-bin`
+selects the native executable. Files are private and replaced atomically; credentials
+are not encrypted separately. Protect this directory as you would your Codex login.
+`--json` is available for readouts; interactive login and switching remain human flows.
+
+Selected profiles, project overrides, and managed configurations outside the
+conservatively supported inspection path can cause refusal. Custom saved provider
+behavior remains Codex's responsibility; Verso does not convert threads to ChatGPT.
+No legacy `codex-auth` migration, cross-machine sync, or per-thread account binding
+is included.
 
 ## Development
 
 ```sh
 go test -race ./...
 go vet ./...
+go build ./cmd/verso
 ```
 
-Coding worktrees live under gitignored `.worktrees/`. Do not test using a live
-Codex home or daemon; use isolated fixtures. Public release artifacts and install
-instructions will be added when the first alpha passes its gates.
+Tests use temporary homes, synthetic credentials, fake HTTP and runtime adapters.
+Never test by restarting the daemon serving an agent's own active turn. Release
+archives cover Darwin/Linux on amd64/arm64, with checksums and deterministic builds.
+Linux fixture tests and cross-builds do not substitute for controlled human testing
+on real accounts. Alpha readiness is refined through actual daily use.
+
+MIT licensed. `verso licenses` prints the license and bundled dependency notices.

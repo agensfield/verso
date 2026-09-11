@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Require main and successful CI at the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed" --jq '.workflow_runs | sort_by(.created_at) | last | .conclusion')"
+          test "$conclusion" = success
+      - run: go mod download
+      - name: Verify release source
+        env:
+          GOPROXY: off
+        run: |
+          go test -race ./...
+          go vet ./...
+      - name: Build reproducible release archives
+        env:
+          GOPROXY: off
+        run: |
+          go run ./scripts/release -version "$GITHUB_REF_NAME" -commit "$GITHUB_SHA" -output dist
+          go run ./scripts/release -version "$GITHUB_REF_NAME" -commit "$GITHUB_SHA" -output repro
+          diff -r dist repro
+          cd dist
+          sha256sum --check checksums.txt
+          mkdir "$RUNNER_TEMP/verso-smoke"
+          tar -xzf "verso_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" -C "$RUNNER_TEMP/verso-smoke"
+          test "$("$RUNNER_TEMP/verso-smoke/verso" version)" = "$GITHUB_REF_NAME"
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --draft \
+            --title "Verso $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md "${args[@]}"
+          count="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length')"
+          test "$count" = 5
+          gh release edit "$GITHUB_REF_NAME" --draft=false

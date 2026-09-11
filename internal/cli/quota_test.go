@@ -131,6 +131,10 @@ func TestListRejectsActiveSelectionChangeDuringUsage(t *testing.T) {
 	if code := a.Run(context.Background(), []string{"list", "--json"}); code == 0 {
 		t.Fatal("selection change was accepted")
 	}
+	var result response
+	if err = json.Unmarshal(out.Bytes(), &result); err != nil || result.Active != "" {
+		t.Fatalf("failed list retained stale active account: %+v / %v", result, err)
+	}
 	if client.refreshes != 0 || len(client.used) != 1 {
 		t.Fatalf("unexpected active operations: %+v", client)
 	}

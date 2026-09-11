@@ -125,6 +125,10 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 		}
 	} else {
 		r.Quotas, r.Active, err = a.fetchQuotas(ctx, r.Accounts, true)
+		if err != nil {
+			// The selection proof is no longer current, so do not render its badge.
+			r.Active = ""
+		}
 		if err == nil {
 			// Inactive credential refresh can update list-safe account metadata.
 			if len(args) == 1 {

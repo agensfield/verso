@@ -222,7 +222,7 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 				if status == "noLayers" {
 					layers = nil
 				}
-				reply = map[string]any{"config": Config{CredentialStore: "file", ModelProvider: "openai"}, "layers": layers}
+				reply = map[string]any{"config": Config{CredentialStore: "file"}, "layers": layers}
 			case "configRequirements/read":
 				if string(req.Params) != "null" {
 					t.Errorf("configRequirements/read params = %s", req.Params)
@@ -411,5 +411,13 @@ func TestConfigWorkspaceUnionDoesNotBreakInspection(t *testing.T) {
 		if cfg, err := ReadConfig(home); err != nil || cfg.CredentialStore != "file" {
 			t.Fatalf("%+v %v", cfg, err)
 		}
+	}
+}
+
+func TestManagedDefaultOpenAIProviderIsRecognized(t *testing.T) {
+	i, _ := managedFixture(t, "idle")
+	o, err := i.Inspect(context.Background())
+	if err != nil || o.Credential.Status != CredentialFileSelected || o.Config.ModelProvider != "openai" {
+		t.Fatalf("%+v %v", o.Credential, err)
 	}
 }

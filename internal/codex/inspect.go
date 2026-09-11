@@ -416,6 +416,11 @@ func resolveLiveCredential(ctx context.Context, rpc *RPC, cwd string, selected a
 	if reply.Config.CredentialStore != "file" {
 		return reply.Config, "", unknownCredential("effective credential mode is not file")
 	}
+	// Config/read preserves an omitted model_provider; the native runtime
+	// resolves that omission to its built-in OpenAI provider.
+	if reply.Config.ModelProvider == "" {
+		reply.Config.ModelProvider = "openai"
+	}
 	if reply.Config.ModelProvider != "openai" {
 		return reply.Config, "", unknownCredential("effective model provider does not use native OpenAI credentials")
 	}

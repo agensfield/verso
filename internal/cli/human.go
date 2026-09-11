@@ -28,12 +28,12 @@ func agentEnvironment(env []string) bool {
 
 func (a *App) requireHuman() error {
 	if agentEnvironment(a.Env) {
-		return errors.New("agents may preview only; run the switch directly in your terminal")
+		return errors.New("run this switch directly in your terminal; use verso preview to inspect it here")
 	}
 	input, inOK := a.In.(*os.File)
 	output, outOK := a.Out.(*os.File)
 	if a.json || !inOK || !outOK || !isatty.IsTerminal(input.Fd()) || !isatty.IsTerminal(output.Fd()) {
-		return errors.New("switch execution requires an interactive human terminal; use preview for automation")
+		return errors.New("run this switch in an interactive terminal; use verso preview for a read-only check")
 	}
 	return nil
 }

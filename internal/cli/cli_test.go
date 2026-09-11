@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/agensfield/verso/internal/accounts"
+	"github.com/agensfield/verso/internal/codex"
 	"github.com/agensfield/verso/internal/switcher"
 )
 
@@ -35,17 +36,87 @@ func TestHelpAndVersionDoNotTouchState(t *testing.T) {
 		}
 	}
 }
-func TestListIsReadOnlyAndJSONFlagsInterspersed(t *testing.T) {
+
+func TestHelpIsCompactAndRoutesCommandDetails(t *testing.T) {
 	a, out, _ := appFixture(t)
-	if code := a.Run(context.Background(), []string{"list", "--json"}); code != 0 {
+	if code := a.Run(context.Background(), []string{"--help"}); code != 0 {
 		t.Fatal(code)
 	}
-	var result response
-	if json.Unmarshal(out.Bytes(), &result) != nil || !result.OK || result.Schema != "verso/v1" {
-		t.Fatal(out.String())
+	compact := out.String()
+	if !strings.Contains(compact, "Usage: verso <command>") || !strings.Contains(compact, "verso --skill") {
+		t.Fatal(compact)
 	}
-	if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
-		t.Fatal("list created store")
+	if lines := strings.Count(strings.TrimSpace(compact), "\n") + 1; lines > 14 {
+		t.Fatalf("top-level help grew to %d lines:\n%s", lines, compact)
+	}
+	if strings.Contains(compact, "--allow-exhausted") || strings.Contains(compact, "--state-dir") {
+		t.Fatal("advanced flags leaked into compact help")
+	}
+	if strings.Contains(compact, "\x1b[") {
+		t.Fatal("piped help contains ANSI")
+	}
+	out.Reset()
+	if code := a.Run(context.Background(), []string{"help", "list"}); code != 0 {
+		t.Fatal(code)
+	}
+	if detail := out.String(); !strings.Contains(detail, "--cached") || !strings.Contains(detail, "no network, RPC, or writes") {
+		t.Fatal(detail)
+	}
+	out.Reset()
+	if code := a.Run(context.Background(), []string{"list", "--help"}); code != 0 || !strings.Contains(out.String(), "--cached") {
+		t.Fatalf("command --help did not route: %d %s", code, out)
+	}
+}
+
+func TestHumanStatusAndTargetUseOperatorLabels(t *testing.T) {
+	a, out, _ := appFixture(t)
+	account := accounts.Account{ID: "hidden-id", Alias: "personal", Email: "same@example.test", UserID: "user", AccountID: "workspace"}
+	runtime := &codex.Observation{
+		Daemon:        switcher.Running,
+		Config:        codex.Config{CredentialStore: "file"},
+		SelectedFile:  accounts.ActiveIdentity{Known: true, UserID: "user", AccountID: "workspace"},
+		SelectedEmail: "same@example.test",
+		Busy:          []string{"hidden-turn-1", "hidden-turn-2"},
+	}
+	plan := &switcher.Plan{Inspection: switcher.Inspection{Daemon: switcher.Running, Busy: []string{"hidden-plan-turn"}}}
+	if code := a.finish(response{Command: "preview", Accounts: []accounts.Account{account}, Runtime: runtime, Plan: plan, Target: &account}, nil); code != 0 {
+		t.Fatal(code)
+	}
+	got := out.String()
+	for _, want := range []string{"Codex: running", "Credentials: file", "Account: personal", "Busy conversations: 1", "Busy conversations: 2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	for _, hidden := range []string{"Target:", `"personal"`, "same@example.test", "hidden-id", "hidden-turn", "Selected file identity", "Credential mode"} {
+		if strings.Contains(got, hidden) {
+			t.Errorf("human output contains %q:\n%s", hidden, got)
+		}
+	}
+	if strings.Contains(got, "\x1b[") {
+		t.Fatal("piped status contains ANSI")
+	}
+}
+func TestEmptyListCreatesNothingAndJSONFlagsAreInterspersed(t *testing.T) {
+	for _, args := range [][]string{{"list", "--json"}, {"list", "--cached", "--json"}} {
+		a, out, _ := appFixture(t)
+		a.RunCommand = func(context.Context, string, ...string) ([]byte, error) {
+			t.Fatal("empty list probed Codex")
+			return nil, nil
+		}
+		if code := a.Run(context.Background(), args); code != 0 {
+			t.Fatal(code)
+		}
+		var result response
+		if json.Unmarshal(out.Bytes(), &result) != nil || !result.OK || result.Schema != "verso/v1" {
+			t.Fatal(out.String())
+		}
+		if strings.Contains(strings.Join(args, " "), "--cached") != result.Cached {
+			t.Fatalf("cached mode not represented: %+v", result)
+		}
+		if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
+			t.Fatal("empty list created state")
+		}
 	}
 }
 func TestListAndPreviewDoNotExposeCredentials(t *testing.T) {
@@ -71,6 +142,8 @@ func TestListAndPreviewDoNotExposeCredentials(t *testing.T) {
 		t.Fatal("credential leak")
 	}
 	out.Reset()
+	client := &quotaClient{}
+	a.Auth = client
 	if err := os.MkdirAll(a.CodexHome, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +158,9 @@ func TestListAndPreviewDoNotExposeCredentials(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(a.CodexHome, "auth.json")); !os.IsNotExist(err) {
 		t.Fatal("preview activated account")
+	}
+	if client.refreshes != 0 || len(client.used) != 0 {
+		t.Fatalf("preview reached network: %+v", client)
 	}
 }
 func TestInvalidCommandAndFlagsFail(t *testing.T) {

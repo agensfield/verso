@@ -28,10 +28,48 @@ func TestLocalResolverSupportsCommonLoggedOutLinuxAndMacPaths(t *testing.T) {
 			req := stoppedRequest(t)
 			resolver := localCredentialResolver{goos: goos, lstat: absentSources, run: RunCommand, managedPrefs: func(context.Context, CommandRunner) (bool, error) { return false, nil }}
 			got, err := resolver.ResolveCredentialConfig(context.Background(), req)
-			if err != nil || got.EffectiveMode != "file" || got.Snapshot == "" {
+			if err != nil || got.Status != CredentialLocalFile || got.EffectiveMode != "file" || got.Snapshot == "" || got.Warning != "" {
 				t.Fatalf("%+v %v", got, err)
 			}
 		})
+	}
+}
+
+func TestLocalResolverLabelsLoggedInCloudBoundary(t *testing.T) {
+	req := stoppedRequest(t)
+	req.Selection.UserID, req.Selection.AccountID = "user", "account"
+	resolver := localCredentialResolver{goos: "linux", lstat: absentSources, run: RunCommand}
+	got, err := resolver.ResolveCredentialConfig(context.Background(), req)
+	if err != nil || got.Status != CredentialLocalFile || got.Warning == "" || got.Basis == "" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+func TestLocalResolverAllowsInactiveProfilesAndNativeConfigAncestor(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, ".codex")
+	cwd := filepath.Join(root, "repos", "project")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := "cli_auth_credentials_store = \"file\"\n[profiles.saved]\nmodel = \"gpt-test\"\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	nativeConfig := filepath.Join(home, "config.toml")
+	resolver := localCredentialResolver{goos: "linux", lstat: func(path string) (os.FileInfo, error) {
+		if path == nativeConfig {
+			return fakeFileInfo{}, nil
+		}
+		return nil, os.ErrNotExist
+	}, run: RunCommand}
+	req := CredentialResolveRequest{Home: home, CWD: cwd, EnvironmentComplete: true, Selection: accounts.ActiveIdentity{Known: true}}
+	got, err := resolver.ResolveCredentialConfig(context.Background(), req)
+	if err != nil || got.Status != CredentialLocalFile {
+		t.Fatalf("%+v %v", got, err)
 	}
 }
 
@@ -41,7 +79,6 @@ func TestLocalResolverRefusesEveryUnresolvedInfluence(t *testing.T) {
 		mutate func(*CredentialResolveRequest)
 		stat   func(string) (os.FileInfo, error)
 	}{
-		{"logged-in-cloud", func(r *CredentialResolveRequest) { r.Selection.UserID, r.Selection.AccountID = "user", "account" }, absentSources},
 		{"runtime-override", func(r *CredentialResolveRequest) {
 			r.LaunchArgs = []string{"--config", "cli_auth_credentials_store=keyring"}
 		}, absentSources},

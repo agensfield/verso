@@ -104,10 +104,37 @@ func TestStoppedCredentialProofRequiresCompleteResolverAndCWD(t *testing.T) {
 	if err != nil || o.Credential.Status != CredentialFileSelected || o.Credential.FileIdentity.AccountID != "account-a" {
 		t.Fatalf("%+v %v", o, err)
 	}
-	i.Resolver = fixedResolver{err: resolutionError("logged-in stopped runtime may receive an unobservable enterprise cloud config")}
+	i.Resolver = fixedResolver{err: resolutionError("project config requires full Codex resolution")}
 	o, err = i.Inspect(context.Background())
-	if err != nil || o.Credential.Reason != "logged-in stopped runtime may receive an unobservable enterprise cloud config" {
+	if err != nil || o.Credential.Reason != "project config requires full Codex resolution" {
 		t.Fatalf("%+v %v", o, err)
+	}
+}
+
+func TestStoppedInspectionExposesLocalModeAndMandatoryWarning(t *testing.T) {
+	home := t.TempDir()
+	testNativeAuth(t, home)
+	i := Inspector{
+		Home:           home,
+		CWD:            t.TempDir(),
+		Run:            noProcesses,
+		LaunchEnvKnown: true,
+		Resolver: fixedResolver{result: CredentialResolution{
+			Status:        CredentialLocalFile,
+			EffectiveMode: "file",
+			Basis:         "explicit-local-file-mode-no-known-local-overrides",
+			Snapshot:      "snapshot",
+			Warning:       "enterprise cloud configuration remains unresolved until Codex is reopened",
+		}},
+	}
+	o, err := i.Inspect(context.Background())
+	if err != nil || o.Daemon != switcher.Stopped || o.Credential.Status != CredentialLocalFile || o.Credential.Warning == "" {
+		t.Fatalf("%+v %v", o, err)
+	}
+	i.Resolver = fixedResolver{result: CredentialResolution{Status: CredentialLocalFile, EffectiveMode: "file", Basis: "local", Snapshot: "snapshot"}}
+	o, err = i.Inspect(context.Background())
+	if err != nil || o.Credential.Status != CredentialUnknown {
+		t.Fatalf("missing warning must fail closed: %+v %v", o, err)
 	}
 }
 

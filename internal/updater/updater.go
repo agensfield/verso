@@ -270,11 +270,16 @@ func releaseAssets(rel release, artifactName, allowedOrigin string) (string, str
 	if artifactURL == "" || checksumURL == "" {
 		return "", "", fmt.Errorf("release %s is missing %s or checksums.txt", rel.TagName, artifactName)
 	}
-	for _, raw := range []string{artifactURL, checksumURL} {
+	for _, selected := range []struct {
+		name string
+		raw  string
+	}{{artifactName, artifactURL}, {"checksums.txt", checksumURL}} {
+		raw := selected.raw
 		u, err := url.Parse(raw)
 		allowed := err == nil && u.Scheme+"://"+u.Host == allowedOrigin
 		if allowedOrigin == "https://api.github.com" {
-			allowed = err == nil && u.Scheme == "https" && u.Hostname() == "github.com" && strings.HasPrefix(u.EscapedPath(), "/agensfield/verso/releases/download/")
+			expectedPath := "/agensfield/verso/releases/download/" + url.PathEscape(rel.TagName) + "/" + url.PathEscape(selected.name)
+			allowed = err == nil && u.Scheme == "https" && u.Hostname() == "github.com" && u.EscapedPath() == expectedPath && u.RawQuery == "" && u.Fragment == ""
 		}
 		if !allowed {
 			return "", "", fmt.Errorf("release asset URL %q is outside the release origin", raw)

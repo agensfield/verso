@@ -143,6 +143,18 @@ func TestOfficialAssetsStayBoundToVersoRepository(t *testing.T) {
 	}
 }
 
+func TestOfficialAssetsStayBoundToSelectedTag(t *testing.T) {
+	artifactName := "verso_0.1.0_linux_amd64.tar.gz"
+	rel := release{TagName: "v0.1.0", Assets: []asset{
+		{Name: artifactName, URL: "https://github.com/agensfield/verso/releases/download/v0.0.9/" + artifactName},
+		{Name: "checksums.txt", URL: "https://github.com/agensfield/verso/releases/download/v0.1.0/checksums.txt"},
+	}}
+	_, _, err := releaseAssets(rel, artifactName, "https://api.github.com")
+	if err == nil || !strings.Contains(err.Error(), "outside the release origin") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestChecksumRequiresOneExactArtifact(t *testing.T) {
 	valid := strings.Repeat("a", 64)
 	for _, tt := range []struct {

@@ -28,7 +28,7 @@ func (a *App) accountMutation(ctx context.Context, command string, args []string
 	if err != nil {
 		return a.finish(r, err)
 	}
-	observed, err := inspector.Inspect(ctx)
+	observed, err := inspector.InspectSelection(ctx)
 	if err != nil {
 		return a.finish(r, err)
 	}

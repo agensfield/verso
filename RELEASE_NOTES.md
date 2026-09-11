@@ -1,9 +1,11 @@
-# Verso v0.1.0-alpha.2
+# Verso v0.1.0-alpha.3
 
 Early public alpha of the Codex account switcher.
 
-This revision fixes managed-daemon inspection when `model_provider` is omitted,
-matching Codex's default OpenAI provider. It supersedes alpha.1.
+This revision fixes current-login import and saved-account removal being blocked
+by an unrelated conversation's error status. Credential identity and configuration
+checks remain; the stricter activity checks still apply to account switching.
+It also includes alpha.2's fix for Codex's default OpenAI provider.
 
 - Direct device authorization and current-login import, with optional aliases.
 - One native Codex home, private saved accounts, demand-driven quota and inactive refresh.

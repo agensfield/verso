@@ -197,6 +197,16 @@ func readRegular(name string, max int64) ([]byte, error) {
 }
 
 func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
+	return i.inspect(ctx, true)
+}
+
+// InspectSelection establishes native selection/config evidence without asking
+// whether conversations can be stopped. Account import does not stop them.
+func (i Inspector) InspectSelection(ctx context.Context) (Observation, error) {
+	return i.inspect(ctx, false)
+}
+
+func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	o := Observation{Daemon: switcher.Unknown, Home: i.Home}
@@ -345,9 +355,12 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	} else if managedOverride != "" {
 		o.Credential = unknownCredential("managed process uses runtime config override " + managedOverride)
 	}
-	busy, err := loadedBusy(ctx, rpc)
-	if err != nil {
-		return o, err
+	var busy []string
+	if activity {
+		busy, err = loadedBusy(ctx, rpc)
+		if err != nil {
+			return o, err
+		}
 	}
 	if servers > 1 {
 		o.Warnings = append(o.Warnings, "additional app-server endpoints may retain previous credentials; restart them after switching")

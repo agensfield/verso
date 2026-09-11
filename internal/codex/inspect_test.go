@@ -421,3 +421,14 @@ func TestManagedDefaultOpenAIProviderIsRecognized(t *testing.T) {
 		t.Fatalf("%+v %v", o.Credential, err)
 	}
 }
+
+func TestSelectionInspectionDoesNotRequireHealthyThreads(t *testing.T) {
+	i, _ := managedFixture(t, "systemError")
+	selected, err := i.InspectSelection(context.Background())
+	if err != nil || selected.Daemon != switcher.Running || selected.Credential.Status != CredentialFileSelected {
+		t.Fatalf("%+v %v", selected.Credential, err)
+	}
+	if _, err := i.Inspect(context.Background()); err == nil {
+		t.Fatal("switch inspection ignored unhealthy activity")
+	}
+}

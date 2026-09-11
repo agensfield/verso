@@ -21,17 +21,19 @@ import (
 )
 
 type App struct {
-	StateDir   string
-	CodexHome  string
-	Binary     string
-	Version    string
-	Env        []string
-	In         io.Reader
-	Out        io.Writer
-	Err        io.Writer
-	RunCommand codex.CommandRunner
-	Auth       DeviceAuthenticator
-	json       bool
+	StateDir           string
+	CodexHome          string
+	Binary             string
+	Version            string
+	Env                []string
+	In                 io.Reader
+	Out                io.Writer
+	Err                io.Writer
+	RunCommand         codex.CommandRunner
+	CWD                string
+	CredentialResolver codex.CredentialResolver
+	Auth               DeviceAuthenticator
+	json               bool
 }
 
 type response struct {
@@ -165,13 +167,23 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		}
 		r.Target = &target
 	}
-	inspector := codex.Inspector{Home: a.CodexHome, Binary: a.Binary, Version: a.Version, Env: a.Env, Run: a.RunCommand}
+	cwd := a.CWD
+	if cwd == "" {
+		cwd, err = os.Getwd()
+		if err != nil {
+			return a.finish(r, errors.New("cannot resolve startup working directory"))
+		}
+	}
+	inspector := codex.Inspector{CWD: cwd, Resolver: a.CredentialResolver, Home: a.CodexHome, Binary: a.Binary, Version: a.Version, Env: a.Env, Run: a.RunCommand}
 	o, err := inspector.Inspect(ctx)
 	r.Runtime = &o
 	if err != nil {
 		return a.finish(r, err)
 	}
 	if command == "preview" {
+		if o.Credential.Status != codex.CredentialFileSelected {
+			return a.finish(r, errors.New("native credential mode is not proven: "+o.Credential.Reason))
+		}
 		if o.Config.CredentialStore != "file" {
 			return a.finish(r, errors.New("explicit file-backed Codex credentials are required"))
 		}

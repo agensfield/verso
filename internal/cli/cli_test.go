@@ -76,8 +76,8 @@ func TestListAndPreviewDoNotExposeCredentials(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(a.CodexHome, "config.toml"), []byte("cli_auth_credentials_store = \"file\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if code := a.Run(context.Background(), []string{"preview", "personal", "--json"}); code != 0 {
-		t.Fatal(out.String())
+	if code := a.Run(context.Background(), []string{"preview", "personal", "--json"}); code == 0 {
+		t.Fatal("preview blessed an unproven user-only config")
 	}
 	if strings.Contains(out.String(), "NEVER-PRINT") {
 		t.Fatal("preview leak")

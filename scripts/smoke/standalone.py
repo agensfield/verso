@@ -1,6 +1,6 @@
 """Exercise the built CLI in an isolated human PTY, with no real Codex or network."""
 
-import base64, json, os, pathlib, pty, select, subprocess, sys, tempfile, time
+import base64, errno, json, os, pathlib, pty, select, subprocess, sys, tempfile, time
 if len(sys.argv) != 2:
     raise SystemExit("usage: python3 scripts/smoke/standalone.py /path/to/verso")
 binary=pathlib.Path(sys.argv[1]).resolve(strict=True)
@@ -31,11 +31,18 @@ with tempfile.TemporaryDirectory(prefix='verso-fixture-') as temporary:
     while process.poll() is None and time.monotonic()<deadline:
         if select.select([master],[],[],0.1)[0]:
             try: output+=os.read(master,65536)
-            except OSError: break
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                break
         if b'[y/N]' in output and not approved:
             os.write(master,b'y\n'); approved=True
-    if process.poll() is None:
-        process.kill(); raise AssertionError('fixture timed out: '+output.decode(errors='replace'))
+    # PTY closure can precede the child becoming waitable by a few milliseconds.
+    try:
+        process.wait(timeout=max(0.001, deadline-time.monotonic()))
+    except subprocess.TimeoutExpired:
+        process.kill(); process.wait()
+        raise AssertionError('fixture timed out: '+output.decode(errors='replace'))
     os.close(master)
     assert approved and process.returncode==0,output.decode(errors='replace')
     selected=json.loads((codex/'auth.json').read_text())['tokens']['account_id']

@@ -2,6 +2,8 @@
 
 Small Go CLI for human-operated Codex account switching. Keep the alpha simple.
 
+- Do not use em dashes in code, comments, CLI output, or documentation.
+
 - Read existing code and the task contract before editing. Use Go builtins first.
 - Never read/log real credentials or switch/restart the shared Codex runtime for tests.
   Tests use temporary homes, synthetic credentials and fake process/RPC adapters.

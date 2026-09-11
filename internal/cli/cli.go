@@ -57,7 +57,7 @@ type response struct {
 	Target   *accounts.Account      `json:"target,omitempty"`
 }
 
-const usage = `Verso — Codex account switching (alpha, under development)
+const usage = `Verso: Codex account switching (alpha, under development)
 
 Usage: verso [options] <command>
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/agensfield/verso/internal/accounts"
+	"github.com/agensfield/verso/internal/auth"
 	"github.com/agensfield/verso/internal/codex"
 )
 
@@ -26,6 +27,7 @@ type App struct {
 	Out        io.Writer
 	Err        io.Writer
 	RunCommand codex.CommandRunner
+	Auth       DeviceAuthenticator
 	json       bool
 }
 
@@ -44,6 +46,7 @@ const usage = `Verso — Codex account switching (alpha, under development)
 
 Usage: verso [options] <command>
 
+  add [alias]           Save an account using device authorization
   list                  List saved accounts without refreshing credentials
   status                Inspect local native account/runtime metadata
   preview <account>     Read-only switch preview for humans and agents
@@ -103,6 +106,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 	if command == "version" && len(pos) == 0 {
 		return a.finish(response{Command: command, Message: a.Version}, nil)
+	}
+	if command == "add" {
+		return a.add(ctx, pos)
 	}
 	if command != "list" && command != "status" && command != "preview" {
 		return a.finish(response{Command: command}, errors.New("unknown command; see verso --help"))
@@ -230,4 +236,9 @@ func flagsFirst(fs *flag.FlagSet, args []string) ([]string, error) {
 		}
 	}
 	return append(flags, append([]string{"--"}, pos...)...), nil
+}
+
+// DeviceAuthenticator separates network enrollment from CLI persistence.
+type DeviceAuthenticator interface {
+	DeviceLogin(context.Context, func(auth.DevicePrompt) error) ([]byte, error)
 }

@@ -1,0 +1,242 @@
+// Package presentation renders human-facing account information.
+package presentation
+
+import (
+	"fmt"
+	"io"
+	"math"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/agensfield/verso/internal/accounts"
+	"github.com/agensfield/verso/internal/auth"
+	"github.com/agensfield/verso/internal/quota"
+)
+
+const barWidth = 10
+
+type palette struct {
+	enabled bool
+}
+
+func (p palette) ansi(code, text string) string {
+	if !p.enabled || text == "" {
+		return text
+	}
+	return "\x1b[" + code + "m" + text + "\x1b[0m"
+}
+
+func (p palette) bold(text string) string  { return p.ansi("1", text) }
+func (p palette) quiet(text string) string { return p.ansi("2", text) }
+
+// Name returns the safe human label used for an account in lists and pickers.
+func Name(account accounts.Account) string {
+	if alias := safeLabel(account.Alias); alias != "" {
+		return truncateLabel(alias, 48)
+	}
+	if email := safeLabel(account.Email); email != "" {
+		return truncateLabel(email, 48)
+	}
+	return "account"
+}
+
+// WriteAccounts writes compact human-facing account cards. Account and
+// workspace identifiers are used for lookup only and are never rendered.
+func WriteAccounts(out io.Writer, saved []accounts.Account, entries map[string]quota.Entry, activeID string, cached bool, color bool, now time.Time) error {
+	var b strings.Builder
+	p := palette{enabled: color}
+	if len(saved) == 0 {
+		b.WriteString("no saved accounts\n")
+		return writeString(out, b.String())
+	}
+
+	for i, account := range saved {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		entry, found := entries[account.ID]
+		writeAccount(&b, p, account, entry, found, account.ID == activeID, cached, now)
+	}
+	return writeString(out, b.String())
+}
+
+func writeString(out io.Writer, value string) error {
+	written, err := io.WriteString(out, value)
+	if err == nil && written != len(value) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+func writeAccount(b *strings.Builder, p palette, account accounts.Account, entry quota.Entry, found, active, cached bool, now time.Time) {
+	b.WriteString(p.bold(Name(account)))
+	var details []string
+	if active {
+		details = append(details, p.ansi("36", "active"))
+	}
+	if entry.Quota != nil && entry.Quota.Plan != nil {
+		if plan := safeLabel(*entry.Quota.Plan); plan != "" {
+			details = append(details, p.quiet(truncateLabel(plan, 20)))
+		}
+	}
+	if len(details) > 0 {
+		b.WriteString("  ")
+		b.WriteString(strings.Join(details, p.quiet(" · ")))
+	}
+	b.WriteByte('\n')
+
+	alias := safeLabel(account.Alias)
+	email := safeLabel(account.Email)
+	if email != "" && (alias == "" || !strings.EqualFold(alias, email)) {
+		fmt.Fprintf(b, "  %s\n", p.quiet(truncateLabel(email, 72)))
+	}
+
+	windowCount := 0
+	if entry.Quota != nil {
+		windowCount += writeWindow(b, p, "5h", entry.Quota.Primary, now)
+		windowCount += writeWindow(b, p, "weekly", entry.Quota.Secondary, now)
+	}
+
+	status := accountStatus(entry, found, cached, now)
+	if windowCount == 0 && status == "" {
+		status = "quota unavailable"
+	}
+	if status != "" {
+		fmt.Fprintf(b, "  %s\n", p.quiet(status))
+	}
+}
+
+func writeWindow(b *strings.Builder, p palette, label string, window *auth.Window, now time.Time) int {
+	if window == nil {
+		return 0
+	}
+	reset := formatReset(window, now)
+	if window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) {
+		fmt.Fprintf(b, "  %-6s %s%s\n", label, p.quiet("usage unknown"), reset)
+		return 1
+	}
+	remaining := clamp(100 - *window.UsedPercent)
+	bar := quotaBar(p, remaining)
+	line := fmt.Sprintf("  %-6s %s  %3.0f%% left%s", label, bar, remaining, reset)
+	b.WriteString(line)
+	b.WriteByte('\n')
+	return 1
+}
+
+func quotaBar(p palette, remaining float64) string {
+	filled := int(math.Round(remaining / (100 / barWidth)))
+	filled = max(0, min(barWidth, filled))
+	code := "36"
+	if remaining <= 10 {
+		code = "31;1"
+	} else if remaining <= 30 {
+		code = "33"
+	}
+	return p.ansi(code, strings.Repeat("▰", filled)) + p.quiet(strings.Repeat("▱", barWidth-filled))
+}
+
+func accountStatus(entry quota.Entry, found, cached bool, now time.Time) string {
+	var status []string
+	if entry.LoginRequired {
+		status = append(status, "login needed")
+	} else if !found || entry.Quota == nil {
+		status = append(status, "quota unavailable")
+	}
+	if entry.Quota != nil && entry.Quota.Exhausted != nil && *entry.Quota.Exhausted {
+		status = append(status, "limit reached")
+	}
+	if entry.Stale {
+		status = append(status, "stale")
+	}
+	if cached {
+		status = append(status, "cached")
+	}
+	if !entry.CheckedAt.IsZero() {
+		status = append(status, "checked "+formatAge(entry.CheckedAt, now))
+	}
+	return strings.Join(status, " · ")
+}
+
+func formatReset(window *auth.Window, now time.Time) string {
+	if window.ResetAfter != nil {
+		return " · in " + formatDuration(*window.ResetAfter)
+	}
+	if window.ResetsAt != nil {
+		location := now.Location()
+		if location == nil {
+			location = time.Local
+		}
+		return " · " + window.ResetsAt.In(location).Format("Mon 15:04")
+	}
+	return ""
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration <= 0 {
+		return "now"
+	}
+	if duration < time.Minute {
+		return "<1m"
+	}
+	duration = duration.Round(time.Minute)
+	days := duration / (24 * time.Hour)
+	duration %= 24 * time.Hour
+	hours := duration / time.Hour
+	minutes := duration % time.Hour / time.Minute
+	parts := make([]string, 0, 2)
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 && len(parts) < 2 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 && len(parts) < 2 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatAge(checkedAt, now time.Time) string {
+	age := now.Sub(checkedAt)
+	if age < time.Minute {
+		return "just now"
+	}
+	return formatDuration(age) + " ago"
+}
+
+func clamp(value float64) float64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+	return max(0, min(100, value))
+}
+
+func safeLabel(value string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			space = b.Len() > 0
+			continue
+		}
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func truncateLabel(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit-1]) + "…"
+}

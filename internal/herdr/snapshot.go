@@ -5,6 +5,8 @@ package herdr
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/agensfield/verso/internal/operation"
@@ -139,4 +141,28 @@ func validate(s *Snapshot) error {
 		}
 	}
 	return nil
+}
+
+// Read returns only a validated metadata checkpoint and performs no writes.
+func Read(root string) (*Snapshot, error) {
+	name := filepath.Join(root, "herdr-snapshot.json")
+	info, err := os.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 8<<20 {
+		return nil, errors.New("cannot safely read Herdr checkpoint")
+	}
+	raw, err := os.ReadFile(name)
+	if err != nil {
+		return nil, errors.New("cannot read Herdr checkpoint")
+	}
+	var s Snapshot
+	if json.Unmarshal(raw, &s) != nil || s.Schema != "verso/herdr/v1" || s.CapturedAt.IsZero() {
+		return nil, errors.New("invalid Herdr checkpoint")
+	}
+	if err := validate(&s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/agensfield/verso/internal/accounts"
+	"github.com/agensfield/verso/internal/switcher"
 )
 
 func appFixture(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
@@ -91,5 +92,37 @@ func TestInvalidCommandAndFlagsFail(t *testing.T) {
 		if code := a.Run(context.Background(), args); code == 0 {
 			t.Fatal(args)
 		}
+	}
+}
+
+func TestRecoveryIsReadOnlyAndReportsUnfinishedOperation(t *testing.T) {
+	a, out, _ := appFixture(t)
+	if a.Run(context.Background(), []string{"recovery", "--json"}) != 0 {
+		t.Fatal(out.String())
+	}
+	if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
+		t.Fatal("recovery created state")
+	}
+	if err := os.MkdirAll(a.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Use the actual journal DTO so recovery checks schema rather than fixture spelling.
+	cp := switcher.Checkpoint{Version: 1, From: "old", Target: "new", HadDaemon: true, Phase: "starting"}
+	raw, _ := json.Marshal(cp)
+	name := filepath.Join(a.StateDir, "switch.json")
+	if err := os.WriteFile(name, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if a.Run(context.Background(), []string{"recovery", "--json"}) != 0 {
+		t.Fatal(out.String())
+	}
+	var r response
+	if json.Unmarshal(out.Bytes(), &r) != nil || r.Journal == nil || r.Journal.Phase != "starting" {
+		t.Fatal(out.String())
+	}
+	after, _ := os.ReadFile(name)
+	if string(after) != string(raw) {
+		t.Fatal("recovery changed journal")
 	}
 }

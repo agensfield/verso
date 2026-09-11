@@ -15,6 +15,9 @@ import (
 	"github.com/agensfield/verso/internal/accounts"
 	"github.com/agensfield/verso/internal/auth"
 	"github.com/agensfield/verso/internal/codex"
+	"github.com/agensfield/verso/internal/herdr"
+	"github.com/agensfield/verso/internal/operation"
+	"github.com/agensfield/verso/internal/switcher"
 )
 
 type App struct {
@@ -32,14 +35,16 @@ type App struct {
 }
 
 type response struct {
-	Schema   string             `json:"schema"`
-	OK       bool               `json:"ok"`
-	Command  string             `json:"command"`
-	Message  string             `json:"message,omitempty"`
-	Error    string             `json:"error,omitempty"`
-	Accounts []accounts.Account `json:"accounts,omitempty"`
-	Runtime  *codex.Observation `json:"runtime,omitempty"`
-	Target   *accounts.Account  `json:"target,omitempty"`
+	Journal  *switcher.Checkpoint `json:"unfinished_switch,omitempty"`
+	Snapshot *herdr.Snapshot      `json:"herdr_snapshot,omitempty"`
+	Schema   string               `json:"schema"`
+	OK       bool                 `json:"ok"`
+	Command  string               `json:"command"`
+	Message  string               `json:"message,omitempty"`
+	Error    string               `json:"error,omitempty"`
+	Accounts []accounts.Account   `json:"accounts,omitempty"`
+	Runtime  *codex.Observation   `json:"runtime,omitempty"`
+	Target   *accounts.Account    `json:"target,omitempty"`
 }
 
 const usage = `Verso — Codex account switching (alpha, under development)
@@ -50,6 +55,7 @@ Usage: verso [options] <command>
   list                  List saved accounts without refreshing credentials
   status                Inspect local native account/runtime metadata
   preview <account>     Read-only switch preview for humans and agents
+  recovery              Read unfinished-switch and Herdr recovery metadata
   version               Print the build version
 
 Options:
@@ -110,7 +116,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if command == "add" {
 		return a.add(ctx, pos)
 	}
-	if command != "list" && command != "status" && command != "preview" {
+	if command != "recovery" && command != "list" && command != "status" && command != "preview" {
 		return a.finish(response{Command: command}, errors.New("unknown command; see verso --help"))
 	}
 	if (command == "preview" && len(pos) != 1) || (command != "preview" && len(pos) != 0) {
@@ -118,6 +124,27 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 	if !filepath.IsAbs(a.StateDir) || !filepath.IsAbs(a.CodexHome) {
 		return a.finish(response{Command: command}, errors.New("state and Codex home paths must be absolute"))
+	}
+
+	if command == "recovery" {
+		r := response{Command: command}
+		var err error
+		r.Journal, err = (operation.Journal{Root: a.StateDir}).Read()
+		if err != nil {
+			return a.finish(r, err)
+		}
+		r.Snapshot, err = herdr.Read(a.StateDir)
+		if err != nil {
+			return a.finish(r, err)
+		}
+		r.Message = "No unfinished switch recorded."
+		if r.Journal != nil {
+			r.Message = "Unfinished switch recorded. Inspect the selected account and runtime before any manual recovery; no restoration has been attempted."
+		}
+		if r.Snapshot != nil {
+			r.Message += " A Herdr checkpoint is available; use --json to view its recovery metadata. Check current panes before recreating any clients."
+		}
+		return a.finish(r, nil)
 	}
 	store, err := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts"))
 	if err != nil {
@@ -179,6 +206,9 @@ func (a *App) finish(r response, err error) int {
 			for _, account := range r.Accounts {
 				_, _ = fmt.Fprintf(a.Out, "%s  %q  %q  workspace=%q\n", account.ID, account.Alias, account.Email, account.AccountID)
 			}
+		}
+		if r.Journal != nil {
+			_, _ = fmt.Fprintf(a.Out, "Phase: %s\nPrevious: %q\nRequested: %q\n", r.Journal.Phase, r.Journal.From, r.Journal.Target)
 		}
 		if r.Runtime != nil {
 			_, _ = fmt.Fprintf(a.Out, "Daemon: %s\nCredential mode: %s\nSelected file identity: %q\n", r.Runtime.Daemon, r.Runtime.Config.CredentialStore, r.Runtime.Email)

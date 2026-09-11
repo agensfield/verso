@@ -35,7 +35,7 @@ func TestConfirmedAbsenceAndStandaloneWarnings(t *testing.T) {
 	testNativeAuth(t, home)
 	i := Inspector{Home: home, Run: noProcesses}
 	o, err := i.Inspect(context.Background())
-	if err != nil || o.Daemon != switcher.Stopped || o.Active.AccountID != "account-a" {
+	if err != nil || o.Daemon != switcher.Stopped || o.SelectedFile.AccountID != "account-a" {
 		t.Fatalf("%+v %v", o, err)
 	}
 	i.Run = func(context.Context, string, ...string) ([]byte, error) {
@@ -74,15 +74,41 @@ func TestAlternativeAuthPresenceRefusesWithoutEchoingValue(t *testing.T) {
 	home := t.TempDir()
 	testNativeAuth(t, home)
 	i := Inspector{Home: home, Run: noProcesses, Env: []string{"CODEX_ACCESS_TOKEN=do-not-echo"}}
-	_, err := i.Inspect(context.Background())
-	if err == nil || strings.Contains(err.Error(), "do-not-echo") {
-		t.Fatal(err)
+	o, err := i.Inspect(context.Background())
+	if err != nil || o.Daemon != switcher.Stopped || o.Credential.Status != CredentialUnknown || strings.Contains(o.Credential.Reason, "do-not-echo") {
+		t.Fatalf("%+v %v", o, err)
+	}
+}
+
+type fixedResolver struct{ result CredentialResolution }
+
+func (r fixedResolver) ResolveCredentialConfig(context.Context, CredentialResolveRequest) (CredentialResolution, error) {
+	return r.result, nil
+}
+
+func TestStoppedCredentialProofRequiresCompleteResolverAndCWD(t *testing.T) {
+	home := t.TempDir()
+	testNativeAuth(t, home)
+	i := Inspector{Home: home, Run: noProcesses}
+	o, err := i.Inspect(context.Background())
+	if err != nil || o.Daemon != switcher.Stopped || o.Credential.Status != CredentialUnknown {
+		t.Fatalf("%+v %v", o, err)
+	}
+	i.CWD = t.TempDir()
+	i.Resolver = fixedResolver{CredentialResolution{EffectiveMode: "file", Basis: "synthetic-complete-stack", Snapshot: "snapshot"}}
+	o, err = i.Inspect(context.Background())
+	if err != nil || o.Credential.Status != CredentialFileSelected || o.Credential.FileIdentity.AccountID != "account-a" {
+		t.Fatalf("%+v %v", o, err)
 	}
 }
 
 func managedFixture(t *testing.T, status string) (Inspector, func()) {
 	t.Helper()
-	home := t.TempDir()
+	home, err := os.MkdirTemp("/tmp", "verso-inspect-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	testNativeAuth(t, home)
 	i := Inspector{Home: home, Version: "test"}
 	pid := os.Getpid()
@@ -102,6 +128,9 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 			if arg == "lstart=" {
 				return []byte(birth), nil
 			}
+		}
+		if name == "readlink" {
+			return []byte(home + "\n"), nil
 		}
 		return []byte(strconv.Itoa(pid) + " /bin/codex app-server --listen unix://\n"), nil
 	}
@@ -129,6 +158,7 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 			var req struct {
 				ID     json.RawMessage `json:"id"`
 				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
 			}
 			if json.Unmarshal(raw, &req) != nil {
 				return
@@ -140,13 +170,31 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 			case "initialized":
 				continue
 			case "config/read":
-				reply = map[string]any{"config": Config{CredentialStore: "file", ModelProvider: "openai"}}
-			case "account/read":
-				reply = map[string]any{"account": map[string]string{"type": "chatgpt", "email": "a@example.test"}}
+				var params struct {
+					IncludeLayers bool   `json:"includeLayers"`
+					CWD           string `json:"cwd"`
+				}
+				if json.Unmarshal(req.Params, &params) != nil || !params.IncludeLayers || params.CWD != home {
+					return
+				}
+				layers := []any{map[string]any{"name": map[string]any{"type": "user", "file": filepath.Join(home, "config.toml"), "profile": nil}, "version": "user-v1", "config": map[string]any{"cli_auth_credentials_store": "file"}}}
+				if status == "noLayers" {
+					layers = nil
+				}
+				reply = map[string]any{"config": Config{CredentialStore: "file", ModelProvider: "openai"}, "layers": layers}
+			case "configRequirements/read":
+				reply = map[string]any{"requirements": map[string]any{"cliAuthCredentialsStore": "file"}}
+			case "account/read", "getAuthStatus":
+				t.Errorf("unsafe identity RPC called: %s", req.Method)
+				return
 			case "thread/loaded/list":
 				reply = map[string]any{"data": []string{"thread-a"}, "nextCursor": nil}
 			case "thread/read":
-				reply = map[string]any{"thread": map[string]any{"status": map[string]any{"type": status, "activeFlags": []string{"waitingOnApproval"}}}}
+				threadStatus := status
+				if status == "noLayers" {
+					threadStatus = "idle"
+				}
+				reply = map[string]any{"thread": map[string]any{"status": map[string]any{"type": threadStatus, "activeFlags": []string{"waitingOnApproval"}}}}
 			default:
 				reply = map[string]any{}
 			}
@@ -172,10 +220,47 @@ func TestManagedRPCBusyAndIdle(t *testing.T) {
 			if err != nil || o.Daemon != switcher.Running {
 				t.Fatalf("%+v %v", o, err)
 			}
+			if o.Credential.Status != CredentialFileSelected {
+				t.Fatalf("credential=%+v", o.Credential)
+			}
 			if (status == "active") != (len(o.Busy) == 1) {
 				t.Fatalf("busy=%v", o.Busy)
 			}
 		})
+	}
+}
+
+func TestMissingLayerEvidenceDoesNotHideRunningState(t *testing.T) {
+	i, _ := managedFixture(t, "noLayers")
+	o, err := i.Inspect(context.Background())
+	if err != nil || o.Daemon != switcher.Running || o.Credential.Status != CredentialUnknown {
+		t.Fatalf("%+v %v", o, err)
+	}
+}
+
+func TestFreshSelectionRequiresNativeWorkspaceIDsAndNewProcess(t *testing.T) {
+	i, _ := managedFixture(t, "idle")
+	expected, selectionErr := ReadNativeSelection(i.Home)
+	if selectionErr != nil {
+		t.Fatal(selectionErr)
+	}
+	proof, err := i.VerifyFreshSelection(context.Background(), ProcessRecord{PID: 999999, StartTime: "old birth"}, expected)
+	if err != nil || proof.Status != CredentialFreshProcess {
+		t.Fatalf("%+v %v", proof, err)
+	}
+	wrongWorkspace := expected
+	wrongWorkspace.Identity.AccountID = "account-b"
+	proof, err = i.VerifyFreshSelection(context.Background(), ProcessRecord{PID: 999999, StartTime: "old birth"}, wrongWorkspace)
+	if err == nil || proof.Status != CredentialUnknown {
+		t.Fatalf("%+v %v", proof, err)
+	}
+	o, inspectErr := i.Inspect(context.Background())
+	if inspectErr != nil {
+		t.Fatal(inspectErr)
+	}
+	proof, err = i.VerifyFreshSelection(context.Background(), *o.Record, expected)
+	if err == nil || proof.Status != CredentialUnknown {
+		t.Fatalf("%+v %v", proof, err)
 	}
 }
 func TestReusedPIDRefuses(t *testing.T) {

@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,16 +32,61 @@ type ProcessRecord struct {
 	PID       int    `json:"pid"`
 	StartTime string `json:"processStartTime"`
 }
+type CredentialProof struct {
+	Status        string                  `json:"status"`
+	Basis         string                  `json:"basis,omitempty"`
+	Reason        string                  `json:"reason,omitempty"`
+	EffectiveMode string                  `json:"effectiveMode,omitempty"`
+	StartupCWD    string                  `json:"startupCwd,omitempty"`
+	FileIdentity  accounts.ActiveIdentity `json:"fileIdentity"`
+}
+
+// NativeSelection is an exact, credential-free fingerprint of one auth.json
+// selection. Capture it after activation and before starting a replacement.
+type NativeSelection struct {
+	Identity accounts.ActiveIdentity
+	Snapshot string
+}
+
+const (
+	CredentialUnknown      = "unknown"
+	CredentialFileSelected = "file-selected"
+	CredentialFreshProcess = "fresh-process"
+)
+
+// CredentialResolver is the deliberately narrow extension point for proving a
+// stopped runtime's future credential mode. The native user config alone is not
+// enough: callers must resolve every supported config source for the startup cwd.
+type CredentialResolver interface {
+	ResolveCredentialConfig(context.Context, CredentialResolveRequest) (CredentialResolution, error)
+}
+
+type CredentialResolveRequest struct {
+	Home string
+	CWD  string
+	Env  []string
+}
+
+type CredentialResolution struct {
+	EffectiveMode string
+	Basis         string
+	Snapshot      string
+}
+
 type Observation struct {
-	Daemon   switcher.Daemon         `json:"daemon"`
-	Home     string                  `json:"codexHome"`
-	Version  string                  `json:"version,omitempty"`
-	Config   Config                  `json:"config"`
-	Active   accounts.ActiveIdentity `json:"activeIdentity"`
-	Email    string                  `json:"email,omitempty"`
-	Busy     []string                `json:"busy,omitempty"`
-	Warnings []string                `json:"warnings,omitempty"`
-	Record   *ProcessRecord          `json:"-"`
+	Daemon         switcher.Daemon         `json:"daemon"`
+	Home           string                  `json:"codexHome"`
+	Version        string                  `json:"version,omitempty"`
+	Config         Config                  `json:"config"`
+	SelectedFile   accounts.ActiveIdentity `json:"selectedFileIdentity"`
+	SelectedEmail  string                  `json:"selectedFileEmail,omitempty"`
+	Email          string                  `json:"-"` // compatibility alias for SelectedEmail
+	Credential     CredentialProof         `json:"credentialProof"`
+	Busy           []string                `json:"busy,omitempty"`
+	Warnings       []string                `json:"warnings,omitempty"`
+	Record         *ProcessRecord          `json:"-"`
+	authSnapshot   string
+	configSnapshot string
 }
 
 // CommandRunner does not return command output in errors, which may contain secrets.
@@ -56,11 +102,13 @@ func RunCommand(ctx context.Context, name string, args ...string) ([]byte, error
 }
 
 type Inspector struct {
-	Home    string
-	Binary  string
-	Version string
-	Run     CommandRunner
-	Env     []string
+	Home     string
+	Binary   string
+	Version  string
+	Run      CommandRunner
+	Env      []string
+	CWD      string
+	Resolver CredentialResolver
 }
 
 func (i Inspector) Socket() string {
@@ -92,18 +140,31 @@ func ReadConfig(home string) (Config, error) {
 
 // ReadIdentity parses local native metadata, not a daemon identity attestation.
 func ReadIdentity(home string) (accounts.ActiveIdentity, string, error) {
+	identity, email, _, err := readIdentitySnapshot(home)
+	return identity, email, err
+}
+
+func ReadNativeSelection(home string) (NativeSelection, error) {
+	identity, _, snapshot, err := readIdentitySnapshot(home)
+	if err != nil {
+		return NativeSelection{}, err
+	}
+	return NativeSelection{Identity: identity, Snapshot: snapshot}, nil
+}
+
+func readIdentitySnapshot(home string) (accounts.ActiveIdentity, string, string, error) {
 	raw, err := readRegular(filepath.Join(home, "auth.json"), 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
-		return accounts.ActiveIdentity{Known: true}, "", nil
+		return accounts.ActiveIdentity{Known: true}, "", fmt.Sprintf("%x", sha256.Sum256(nil)), nil
 	}
 	if err != nil {
-		return accounts.ActiveIdentity{}, "", errors.New("cannot read native credential file safely")
+		return accounts.ActiveIdentity{}, "", "", errors.New("cannot read native credential file safely")
 	}
 	auth, err := accounts.ParseNativeAuth(raw)
 	if err != nil {
-		return accounts.ActiveIdentity{}, "", err
+		return accounts.ActiveIdentity{}, "", "", err
 	}
-	return accounts.ActiveIdentity{Known: true, UserID: auth.UserID, AccountID: auth.AccountID}, auth.Email, nil
+	return accounts.ActiveIdentity{Known: true, UserID: auth.UserID, AccountID: auth.AccountID}, auth.Email, fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }
 
 func readRegular(name string, max int64) ([]byte, error) {
@@ -126,24 +187,27 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	}
 	cfg, err := ReadConfig(i.Home)
 	if err != nil {
-		return o, err
+		o.Credential = unknownCredential("user config metadata is unavailable")
+	} else {
+		o.Config = cfg
 	}
-	o.Config = cfg
-	o.Active, o.Email, err = ReadIdentity(i.Home)
+	o.SelectedFile, o.SelectedEmail, o.authSnapshot, err = readIdentitySnapshot(i.Home)
+	o.Email = o.SelectedEmail
 	if err != nil {
-		return o, err
+		o.Credential = unknownCredential("native credential metadata is unavailable")
 	}
-	for _, entry := range i.Env {
-		key, value, ok := strings.Cut(entry, "=")
-		if ok && value != "" && (key == "CODEX_ACCESS_TOKEN" || key == "OPENAI_API_KEY" || key == "CODEX_EXEC_SERVER_URL") {
-			return o, fmt.Errorf("alternative auth/runtime override %s is present; cannot establish native ownership", key)
-		}
+	if o.Credential.Status == "" {
+		o.Credential = unknownCredential("effective credential mode has not been resolved")
+	}
+	if key := alternativeOverride(i.Env); key != "" {
+		o.Credential = unknownCredential("alternative auth or runtime override " + key + " is present")
 	}
 	processes, err := i.processes(ctx)
 	if err != nil {
 		return o, err
 	}
 	servers := 0
+	managedOverride := ""
 	for _, p := range processes {
 		fields := strings.Fields(p.Command)
 		if len(fields) == 0 || !i.isCodex(fields[0]) {
@@ -157,6 +221,9 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 				o.Warnings = append(o.Warnings, fmt.Sprintf("private Codex app-server %d must be restarted after switching", p.PID))
 			} else {
 				servers++
+				if managedOverride == "" {
+					managedOverride = commandConfigOverride(fields[2:])
+				}
 			}
 			continue
 		}
@@ -196,6 +263,22 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 			return o, errors.New("socket or unmanaged app-server exists without a verified managed process")
 		}
 		o.Daemon = switcher.Stopped
+		if i.Resolver == nil {
+			o.Credential = unknownCredential("stopped runtime has no complete config resolver")
+		} else if strings.TrimSpace(i.CWD) == "" || !filepath.IsAbs(i.CWD) {
+			o.Credential = unknownCredential("stopped runtime startup cwd is unavailable")
+		} else if alternativeOverride(i.Env) == "" && o.SelectedFile.Known {
+			resolved, resolveErr := i.Resolver.ResolveCredentialConfig(ctx, CredentialResolveRequest{Home: i.Home, CWD: i.CWD, Env: i.Env})
+			if resolveErr != nil {
+				o.Credential = unknownCredential("stopped runtime config sources could not be resolved")
+			} else if resolved.EffectiveMode != "file" || resolved.Basis == "" || resolved.Snapshot == "" {
+				o.Credential = unknownCredential("stopped runtime is not proven file-backed")
+			} else {
+				o.Config.CredentialStore = resolved.EffectiveMode
+				o.configSnapshot = resolved.Snapshot
+				o.Credential = CredentialProof{Status: CredentialFileSelected, Basis: resolved.Basis, EffectiveMode: resolved.EffectiveMode, StartupCWD: i.CWD, FileIdentity: o.SelectedFile}
+			}
+		}
 		return o, nil
 	}
 	if socketErr != nil {
@@ -218,28 +301,14 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	if err != nil || home != serverHome {
 		return o, errors.New("daemon reports a different Codex home")
 	}
-	var configReply struct {
-		Config Config `json:"config"`
-	}
-	if err := rpc.Call(ctx, "config/read", map[string]any{"includeLayers": false}, &configReply); err != nil {
-		return o, err
-	}
-	o.Config = configReply.Config
-	var accountReply struct {
-		Account *struct {
-			Type  string `json:"type"`
-			Email string `json:"email"`
-		} `json:"account"`
-	}
-	if err := rpc.Call(ctx, "account/read", map[string]bool{"refreshToken": false}, &accountReply); err != nil {
-		return o, err
-	}
-	if accountReply.Account == nil {
-		if o.Active.UserID != "" {
-			return o, errors.New("daemon is logged out but credential file selects an account")
-		}
-	} else if accountReply.Account.Type != "chatgpt" || accountReply.Account.Email != o.Email {
-		return o, errors.New("daemon account does not agree with native credential metadata")
+	cwd, cwdErr := i.processCWD(ctx, record.PID)
+	if cwdErr != nil || !filepath.IsAbs(cwd) {
+		o.Credential = unknownCredential("managed process startup cwd is unavailable")
+	} else if alternativeOverride(i.Env) == "" && managedOverride == "" && o.SelectedFile.Known {
+		cfg, snapshot, proof := resolveLiveCredential(ctx, rpc, cwd, o.SelectedFile)
+		o.Config, o.configSnapshot, o.Credential = cfg, snapshot, proof
+	} else if managedOverride != "" {
+		o.Credential = unknownCredential("managed process uses runtime config override " + managedOverride)
 	}
 	busy, err := loadedBusy(ctx, rpc)
 	if err != nil {
@@ -251,6 +320,127 @@ func (i Inspector) Inspect(ctx context.Context) (Observation, error) {
 	o.Daemon, o.Record, o.Busy, o.Version = switcher.Running, record, busy, rpc.Info.UserAgent
 	o.Warnings = append(o.Warnings, "background activity is not completely observable; native shutdown may interrupt it")
 	return o, nil
+}
+
+func unknownCredential(reason string) CredentialProof {
+	return CredentialProof{Status: CredentialUnknown, Reason: reason}
+}
+
+func alternativeOverride(env []string) string {
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && value != "" && (key == "CODEX_ACCESS_TOKEN" || key == "OPENAI_API_KEY" || key == "CODEX_EXEC_SERVER_URL" || key == "CODEX_HOME" || key == "CODEX_SQLITE_HOME") {
+			return key
+		}
+	}
+	return ""
+}
+
+func commandConfigOverride(args []string) string {
+	for _, arg := range args {
+		if arg == "-c" || arg == "--config" || strings.HasPrefix(arg, "--config=") || arg == "--profile" || strings.HasPrefix(arg, "--profile=") || arg == "--auth" || strings.HasPrefix(arg, "--auth=") {
+			return strings.SplitN(arg, "=", 2)[0]
+		}
+	}
+	return ""
+}
+
+type configLayer struct {
+	Name struct {
+		Type string `json:"type"`
+	} `json:"name"`
+	Version string `json:"version"`
+}
+
+func resolveLiveCredential(ctx context.Context, rpc *RPC, cwd string, selected accounts.ActiveIdentity) (Config, string, CredentialProof) {
+	var reply struct {
+		Config Config        `json:"config"`
+		Layers []configLayer `json:"layers"`
+	}
+	params := map[string]any{"includeLayers": true, "cwd": cwd}
+	if err := rpc.Call(ctx, "config/read", params, &reply); err != nil {
+		return Config{}, "", unknownCredential("effective config layers are unavailable")
+	}
+	var requirements struct {
+		Requirements *struct {
+			CredentialStore *string `json:"cliAuthCredentialsStore"`
+		} `json:"requirements"`
+	}
+	if err := rpc.Call(ctx, "configRequirements/read", map[string]any{}, &requirements); err != nil {
+		return reply.Config, "", unknownCredential("effective config requirements are unavailable")
+	}
+	if reply.Config.CredentialStore != "file" {
+		return reply.Config, "", unknownCredential("effective credential mode is not file")
+	}
+	if reply.Config.ModelProvider != "openai" {
+		return reply.Config, "", unknownCredential("effective model provider does not use native OpenAI credentials")
+	}
+	if requirements.Requirements != nil && requirements.Requirements.CredentialStore != nil && *requirements.Requirements.CredentialStore != "file" {
+		return reply.Config, "", unknownCredential("credential requirement disagrees with effective config")
+	}
+	if len(reply.Layers) == 0 {
+		return reply.Config, "", unknownCredential("effective config returned no layer evidence")
+	}
+	known := map[string]bool{"packagedDefaults": true, "mdm": true, "system": true, "enterpriseManaged": true, "user": true, "project": true, "sessionFlags": true, "legacyManagedConfigTomlFromFile": true, "legacyManagedConfigTomlFromMdm": true}
+	for _, layer := range reply.Layers {
+		if !known[layer.Name.Type] || layer.Version == "" {
+			return reply.Config, "", unknownCredential("effective config contains an unsupported layer")
+		}
+	}
+	raw, err := json.Marshal(struct {
+		Mode        string        `json:"mode"`
+		CWD         string        `json:"cwd"`
+		Layers      []configLayer `json:"layers"`
+		Requirement any           `json:"requirement"`
+	}{reply.Config.CredentialStore, cwd, reply.Layers, requirements.Requirements})
+	if err != nil {
+		return reply.Config, "", unknownCredential("effective config snapshot is unavailable")
+	}
+	snapshot := fmt.Sprintf("%x", sha256.Sum256(raw))
+	return reply.Config, snapshot, CredentialProof{Status: CredentialFileSelected, Basis: "effective-config-and-native-file", EffectiveMode: "file", StartupCWD: cwd, FileIdentity: selected}
+}
+
+// VerifyFreshSelection is for the post-start phase of a switch. It attests only
+// that a fresh managed process started from the reread target file under the
+// resolved file-backed config; it does not claim the server exposed native IDs.
+func (i Inspector) VerifyFreshSelection(ctx context.Context, previous ProcessRecord, expected NativeSelection) (CredentialProof, error) {
+	if !expected.Identity.Known || expected.Identity.UserID == "" || expected.Identity.AccountID == "" || expected.Snapshot == "" {
+		return unknownCredential("expected native identity is incomplete"), errors.New("cannot verify an incomplete target identity")
+	}
+	o, err := i.Inspect(ctx)
+	if err != nil {
+		return o.Credential, err
+	}
+	if o.Daemon != switcher.Running || o.Record == nil {
+		return unknownCredential("fresh managed process is not running"), errors.New("fresh managed process is not running")
+	}
+	if o.Record.PID == previous.PID && normalSpace(o.Record.StartTime) == normalSpace(previous.StartTime) {
+		return unknownCredential("managed process was not replaced"), errors.New("managed process was not replaced")
+	}
+	if o.Credential.Status != CredentialFileSelected || o.configSnapshot == "" {
+		return o.Credential, errors.New("fresh process credential mode is unproven")
+	}
+	selected, _, authSnapshot, err := readIdentitySnapshot(i.Home)
+	if err != nil || authSnapshot == "" || authSnapshot != expected.Snapshot || authSnapshot != o.authSnapshot || selected.UserID != expected.Identity.UserID || selected.AccountID != expected.Identity.AccountID {
+		return unknownCredential("installed native identity changed or does not match target"), errors.New("installed native identity does not match target")
+	}
+	processes, err := i.processes(ctx)
+	if err != nil {
+		return unknownCredential("old process exit cannot be established"), err
+	}
+	for _, process := range processes {
+		if process.PID != previous.PID {
+			continue
+		}
+		birth, birthErr := i.command(ctx, "ps", "-p", strconv.Itoa(previous.PID), "-o", "lstart=")
+		if birthErr == nil && normalSpace(string(birth)) == normalSpace(previous.StartTime) {
+			return unknownCredential("old managed process is still running"), errors.New("old managed process is still running")
+		}
+	}
+	proof := o.Credential
+	proof.Status = CredentialFreshProcess
+	proof.Basis = "fresh-managed-process-and-native-file"
+	return proof, nil
 }
 
 func (i Inspector) readRecord() (*ProcessRecord, error) {

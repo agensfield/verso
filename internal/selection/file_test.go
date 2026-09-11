@@ -63,6 +63,9 @@ func TestNativeFileSafety(t *testing.T) {
 				if err := os.WriteFile(name, native("a"), 0644); err != nil {
 					t.Fatal(err)
 				}
+				if err := os.Chmod(name, 0644); err != nil {
+					t.Fatal(err)
+				}
 			case "directory":
 				if err := os.Mkdir(name, 0700); err != nil {
 					t.Fatal(err)

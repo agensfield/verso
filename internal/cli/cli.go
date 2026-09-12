@@ -416,6 +416,7 @@ func contractText(contract *contractMetadata) string {
 }
 
 func (a *App) finish(r response, err error) int {
+	err = publicError(err)
 	if r.Accounts == nil {
 		r.Accounts = []accounts.Account{}
 	}
@@ -487,8 +488,16 @@ func (a *App) finish(r response, err error) int {
 			if r.Runtime.Credential.Warning != "" {
 				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), r.Runtime.Credential.Warning)
 			}
-			if len(r.Runtime.Busy) > 0 {
-				writef(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Runtime.Busy))
+			if r.Runtime.ActivityKnown {
+				writef(a.Out, "%s %s\n", a.humanHeading("Activity:"), activityLabel(len(r.Runtime.Busy)))
+			} else {
+				writef(a.Out, "%s unavailable\n", a.humanHeading("Activity:"))
+				if r.Runtime.ActivityError != "" {
+					writef(a.Out, "%s %s\n", a.humanHeading("Activity detail:"), r.Runtime.ActivityError)
+				}
+			}
+			if summary := clientSummary(r.Runtime.Clients); summary != "" {
+				writef(a.Out, "%s %s\n", a.humanHeading("Process candidates:"), summary)
 			}
 			for _, warning := range r.Runtime.Warnings {
 				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
@@ -518,6 +527,27 @@ func (a *App) finish(r response, err error) int {
 		return 1
 	}
 	return 0
+}
+
+func publicError(err error) error {
+	if err == nil {
+		return nil
+	}
+	for _, known := range []error{
+		accounts.ErrNotFound, accounts.ErrAmbiguous, accounts.ErrUnsafePath,
+		accounts.ErrUnknownActive, accounts.ErrActiveAccount, accounts.ErrIdentityMismatch,
+		accounts.ErrInvalidSchema, accounts.ErrInvalidAlias, accounts.ErrAliasConflict,
+		accounts.ErrReadOnly,
+	} {
+		if errors.Is(err, known) {
+			return known
+		}
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return errors.New("filesystem operation failed")
+	}
+	return err
 }
 
 type invocationIntent struct {
@@ -640,6 +670,8 @@ func writeExit(out io.Writer, value string) int {
 
 func credentialProofLabel(proof codex.CredentialProof) string {
 	switch proof.Status {
+	case codex.CredentialLocalFile:
+		return "effective local file mode resolved"
 	case codex.CredentialFileSelected:
 		return "selected login matches effective file mode"
 	case codex.CredentialFreshProcess:
@@ -649,6 +681,33 @@ func credentialProofLabel(proof codex.CredentialProof) string {
 	default:
 		return "unverified (see JSON for status)"
 	}
+}
+
+func activityLabel(busy int) string {
+	if busy == 0 {
+		return "no busy conversations observed"
+	}
+	if busy == 1 {
+		return "1 busy conversation observed"
+	}
+	return fmt.Sprintf("%d busy conversations observed", busy)
+}
+
+func clientSummary(clients []codex.Client) string {
+	counts := map[codex.ClientKind]int{}
+	for _, client := range clients {
+		counts[client.Kind]++
+	}
+	parts := make([]string, 0, 3)
+	for _, item := range []struct {
+		kind  codex.ClientKind
+		label string
+	}{{codex.ClientAttached, "attached intent"}, {codex.ClientStandalone, "standalone runtime"}, {codex.ClientUnknown, "unknown role"}} {
+		if count := counts[item.kind]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", count, item.label))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func recoveryPhase(phase string) string {

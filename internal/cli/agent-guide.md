@@ -41,6 +41,12 @@ observation. `accounts` is an empty array when none are saved. `selection.status
 states whether selection was verified, unmatched, absent, unknown, or not inspected.
 `quota_observation.complete` can be false while `ok` remains true because saved
 account discovery succeeded independently of one or more quota requests.
+`account_inventory.complete: false` means healthy accounts are partial and mutations
+remain strict. `status` still reports independent runtime evidence when the saved
+inventory is damaged. Runtime `activityKnown` and `activityError` describe loaded
+conversation inspection separately. `clients` is a bounded process-candidate
+inventory; `attached` records explicit attachment intent, not a live socket
+attestation, while `unknown` must remain advisory.
 
 ## Save or inspect accounts when requested
 

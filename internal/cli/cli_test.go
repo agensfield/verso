@@ -78,18 +78,20 @@ func TestHumanStatusAndTargetUseOperatorLabels(t *testing.T) {
 		SelectedFile:  accounts.ActiveIdentity{Known: true, UserID: "user", AccountID: "workspace"},
 		SelectedEmail: "same@example.test",
 		Busy:          []string{"hidden-turn-1", "hidden-turn-2"},
+		ActivityKnown: true,
+		Clients:       []codex.Client{{PID: 4242, Kind: codex.ClientAttached}, {PID: 4343, Kind: codex.ClientUnknown}},
 	}
 	plan := &switcher.Plan{Inspection: switcher.Inspection{Daemon: switcher.Running, Busy: []string{"hidden-plan-turn"}}}
 	if code := a.finish(response{Command: "preview", Accounts: []accounts.Account{account}, Runtime: runtime, Plan: plan, Target: &account}, nil); code != 0 {
 		t.Fatal(code)
 	}
 	got := out.String()
-	for _, want := range []string{"Codex: running", "Credentials: file", "Account: personal", "Busy conversations: 1", "Busy conversations: 2"} {
+	for _, want := range []string{"Codex: running", "Credentials: file", "Account: personal", "Busy conversations: 1", "Activity: 2 busy conversations observed", "Process candidates: 1 attached intent, 1 unknown role"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
 		}
 	}
-	for _, hidden := range []string{"Target:", `"personal"`, "same@example.test", "hidden-id", "hidden-turn", "Selected file identity", "Credential mode"} {
+	for _, hidden := range []string{"Target:", `"personal"`, "same@example.test", "hidden-id", "hidden-turn", "4242", "4343", "Selected file identity", "Credential mode"} {
 		if strings.Contains(got, hidden) {
 			t.Errorf("human output contains %q:\n%s", hidden, got)
 		}
@@ -346,5 +348,36 @@ func TestCorruptAccountDoesNotHideRuntimeOrHealthyExactLookup(t *testing.T) {
 	var listed response
 	if err := json.Unmarshal(out.Bytes(), &listed); err != nil || len(listed.Accounts) != 1 || listed.Accounts[0].ID != good.ID || listed.Inventory.Complete {
 		t.Fatalf("healthy exact lookup lost completeness: %s", out.String())
+	}
+}
+
+func TestAccountStoreDiagnosticsDoNotExposeUnsafeEntryNames(t *testing.T) {
+	for _, command := range []string{"list", "preview", "alias"} {
+		a, out, errOut := appFixture(t)
+		store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		native, _ := accounts.ParseNativeAuth(quotaAuth("work", "secret"))
+		if _, err := store.Save(native, "work"); err != nil {
+			t.Fatal(err)
+		}
+		unsafeName := "SENSITIVE-ENTRY-NAME.json"
+		if err := os.WriteFile(filepath.Join(a.StateDir, "accounts", unsafeName), []byte("SENSITIVE-CONTENT"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{command, "missing", "--json"}
+		if command == "list" {
+			args = append(args, "--cached")
+		}
+		if command == "alias" {
+			args = []string{command, "work", "new", "--json"}
+		}
+		if a.Run(context.Background(), args) == 0 {
+			t.Fatalf("%s unexpectedly succeeded", command)
+		}
+		if strings.Contains(out.String()+errOut.String(), "SENSITIVE") {
+			t.Fatalf("%s exposed unsafe entry: %s", command, out.String())
+		}
 	}
 }

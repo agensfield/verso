@@ -60,6 +60,16 @@ func TestAccountNumberLeavesConfirmationInputUnread(t *testing.T) {
 		t.Fatalf("picker consumed confirmation input: %v", err)
 	}
 }
+
+func TestConfirmationLeavesLaterPromptInputUnread(t *testing.T) {
+	in := strings.NewReader("yes\ny\n")
+	if err := confirm(context.Background(), in, io.Discard, "Reauthenticate?"); err != nil {
+		t.Fatal(err)
+	}
+	if err := confirm(context.Background(), in, io.Discard, "Switch?"); err != nil {
+		t.Fatalf("first confirmation consumed the second: %v", err)
+	}
+}
 func TestConfirmationNeverDefaultsToApproval(t *testing.T) {
 	for _, answer := range []string{"", "\n", "no\n", "maybe\n"} {
 		if err := confirm(context.Background(), strings.NewReader(answer), new(bytes.Buffer), "Switch?"); err == nil {

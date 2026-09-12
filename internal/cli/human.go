@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -46,26 +45,19 @@ func confirm(ctx context.Context, in io.Reader, out io.Writer, prompt string) er
 	if _, err := fmt.Fprint(out, prompt+" [y/N] "); err != nil {
 		return err
 	}
-	answer := make(chan bool, 1)
-	go func() {
-		scanner := bufio.NewScanner(io.LimitReader(in, 4096))
-		accepted := false
-		if scanner.Scan() {
-			line := strings.ToLower(strings.TrimSpace(scanner.Text()))
-			accepted = line == "y" || line == "yes"
+	line, err := readLine(ctx, in, 4096)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
-		answer <- accepted
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case yes := <-answer:
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !yes {
-			return errors.New("cancelled; no switch performed")
-		}
-		return nil
+		return errors.New("cancelled; no switch performed")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	if answer != "y" && answer != "yes" {
+		return errors.New("cancelled; no switch performed")
+	}
+	return nil
 }

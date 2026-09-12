@@ -112,12 +112,14 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 	if err != nil {
 		return a.finish(r, err)
 	}
-	r.Accounts, err = store.List()
+	var issues []accounts.AccountIssue
+	r.Accounts, issues, err = store.ListPartial()
 	if err != nil {
 		return a.finish(r, err)
 	}
+	r.Inventory = inventoryResult(issues, nil)
 	if len(args) == 1 {
-		account, e := store.Find(args[0])
+		account, e := findInspectionAccount(store, r.Accounts, issues, args[0])
 		if e != nil {
 			r.Accounts = []accounts.Account{}
 			return a.finish(r, e)
@@ -125,7 +127,11 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 		r.Accounts = []accounts.Account{account}
 	}
 	if len(r.Accounts) == 0 {
-		r.Message = "No accounts saved. Import the current login with `verso import personal`, or add another with `verso add work`."
+		if len(issues) > 0 {
+			r.Message = "No healthy saved accounts could be listed. Inspect account_inventory in JSON before changing account state."
+		} else {
+			r.Message = "No accounts saved. Import the current login with `verso import personal`, or add another with `verso add work`."
+		}
 		source := "refresh"
 		if cached {
 			source = "cache"
@@ -133,7 +139,11 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 		r.QuotaState = &quotaMetadata{Source: source, Complete: true}
 		return a.finish(r, nil)
 	}
-	if cached {
+	if cached || len(issues) > 0 {
+		if len(issues) > 0 && !cached {
+			r.Cached = true
+			r.Message = "Account inventory is incomplete. Usage refresh was skipped; showing healthy saved accounts with cached observations."
+		}
 		r.Quotas = make(map[string]quota.Entry, len(r.Accounts))
 		for _, account := range r.Accounts {
 			entry, _, cacheErr := (quota.Service{Root: a.StateDir}).Cached(account.ID)
@@ -166,7 +176,7 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 		}
 		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, attempted, true)
 	}
-	if cached {
+	if r.Cached {
 		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, 0, false)
 	}
 	r.QuotaInfo = quotaWires(r.Accounts, r.Quotas)

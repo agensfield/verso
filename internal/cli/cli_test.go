@@ -311,3 +311,40 @@ func TestRecoveryIsReadOnlyAndReportsUnfinishedOperation(t *testing.T) {
 		t.Fatal("recovery changed journal")
 	}
 }
+
+func TestCorruptAccountDoesNotHideRuntimeOrHealthyExactLookup(t *testing.T) {
+	a, out, _ := appFixture(t)
+	a.CredentialResolver = fixtureResolver{}
+	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodAuth, _ := accounts.ParseNativeAuth(quotaAuth("good", "good-token"))
+	badAuth, _ := accounts.ParseNativeAuth(quotaAuth("bad", "bad-token"))
+	good, err := store.Save(goodAuth, "good")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, err := store.Save(badAuth, "bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.StateDir, "accounts", bad.ID+".json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := a.Run(context.Background(), []string{"status", "--json"}); code != 0 {
+		t.Fatalf("status exited %d: %s", code, out.String())
+	}
+	var status response
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil || status.Runtime == nil || status.Inventory == nil || status.Inventory.Complete {
+		t.Fatalf("status lost partial evidence: %s", out.String())
+	}
+	out.Reset()
+	if code := a.Run(context.Background(), []string{"list", good.ID, "--cached", "--json"}); code != 0 {
+		t.Fatalf("healthy exact lookup exited %d: %s", code, out.String())
+	}
+	var listed response
+	if err := json.Unmarshal(out.Bytes(), &listed); err != nil || len(listed.Accounts) != 1 || listed.Accounts[0].ID != good.ID || listed.Inventory.Complete {
+		t.Fatalf("healthy exact lookup lost completeness: %s", out.String())
+	}
+}

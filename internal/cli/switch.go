@@ -153,7 +153,8 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 	if err != nil {
 		return a.finish(r, err)
 	}
-	result, err := (switcher.Engine{Backend: backend}).Execute(ctx, switcher.Request{Target: target.ID, AllowExhausted: allowExhausted, AllowNoSnapshot: allowNoSnapshot}, func(plan switcher.Plan) error {
+	engine := switcher.Engine{Backend: backend, OnProgress: func(phase string) { a.progress("%s", switchProgress(phase)) }}
+	result, err := engine.Execute(ctx, switcher.Request{Target: target.ID, AllowExhausted: allowExhausted, AllowNoSnapshot: allowNoSnapshot}, func(plan switcher.Plan) error {
 		for _, warning := range plan.Warnings {
 			_, _ = fmt.Fprintln(a.Out, "Warning:", warning)
 		}
@@ -178,6 +179,29 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		}
 	}
 	return a.finish(r, err)
+}
+
+func switchProgress(phase string) string {
+	switch phase {
+	case "preparing":
+		return "Preparing target credentials..."
+	case "stopping":
+		return "Stopping the managed Codex daemon..."
+	case "saving":
+		return "Saving recovery metadata..."
+	case "activating":
+		return "Activating the requested account..."
+	case "starting":
+		return "Starting the managed Codex daemon..."
+	case "verifying":
+		return "Verifying the selected account..."
+	case "committed":
+		return "Switch verified."
+	case "rolling_back":
+		return "Restoring the previous account..."
+	default:
+		return "Switch phase: " + phase
+	}
 }
 
 func readAccountNumber(ctx context.Context, in io.Reader, out io.Writer, count int) (int, error) {

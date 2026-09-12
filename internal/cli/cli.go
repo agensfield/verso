@@ -67,6 +67,13 @@ type response struct {
 	Contract    *contractMetadata      `json:"contract,omitempty"`
 	Selection   *selectionMetadata     `json:"selection,omitempty"`
 	QuotaState  *quotaMetadata         `json:"quota_observation,omitempty"`
+	Inventory   *inventoryMetadata     `json:"account_inventory,omitempty"`
+}
+
+type inventoryMetadata struct {
+	Complete bool                    `json:"complete"`
+	Issues   []accounts.AccountIssue `json:"issues"`
+	Error    string                  `json:"error,omitempty"`
 }
 
 type versionMetadata struct {
@@ -138,6 +145,7 @@ Usage: verso <command>
   switch [account]      Switch accounts
   add [alias]           Add an account
   import [alias]        Save your current login
+  alias <account> <new> Rename a saved account
   remove <account>      Remove a saved account
   preview <account>     Check before switching
 
@@ -259,6 +267,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if command == "import" || command == "remove" {
 		return a.accountMutation(ctx, command, pos)
 	}
+	if command == "alias" {
+		return a.aliasAccount(ctx, pos)
+	}
 	if command == "add" {
 		return a.add(ctx, pos)
 	}
@@ -291,21 +302,22 @@ func (a *App) Run(ctx context.Context, args []string) int {
 			r.Message += " A Herdr checkpoint is available; use --json to view its recovery metadata. Check current panes before recreating any clients."
 		}
 		if store, openErr := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts")); openErr == nil {
-			r.Accounts, _ = store.List()
+			r.Accounts, _, _ = store.ListPartial()
 		}
 		return a.finish(r, nil)
 	}
-	store, err := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts"))
-	if err != nil {
-		return a.finish(response{Command: command}, err)
+	store, storeErr := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts"))
+	saved := []accounts.Account{}
+	issues := []accounts.AccountIssue{}
+	if storeErr == nil {
+		saved, issues, storeErr = store.ListPartial()
 	}
-	saved, err := store.List()
-	if err != nil {
-		return a.finish(response{Command: command}, err)
-	}
-	r := response{Command: command, Accounts: saved}
+	r := response{Command: command, Accounts: saved, Inventory: inventoryResult(issues, storeErr)}
 	if command == "preview" {
-		target, e := store.Find(pos[0])
+		if storeErr != nil {
+			return a.finish(r, storeErr)
+		}
+		target, e := findInspectionAccount(store, saved, issues, pos[0])
 		if e != nil {
 			return a.finish(r, e)
 		}
@@ -330,6 +342,38 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 
 	return a.finish(r, nil)
+}
+
+func inventoryResult(issues []accounts.AccountIssue, err error) *inventoryMetadata {
+	result := &inventoryMetadata{Complete: err == nil && len(issues) == 0, Issues: issues}
+	if result.Issues == nil {
+		result.Issues = []accounts.AccountIssue{}
+	}
+	if err != nil {
+		result.Error = "account inventory unavailable"
+	}
+	return result
+}
+
+func findInspectionAccount(store *accounts.Store, saved []accounts.Account, issues []accounts.AccountIssue, query string) (accounts.Account, error) {
+	account, err := store.Find(query)
+	if err == nil || len(issues) == 0 {
+		return account, err
+	}
+	matches := make([]accounts.Account, 0, 1)
+	for _, candidate := range saved {
+		if candidate.ID == query || candidate.Alias == query || candidate.Email == query {
+			matches = append(matches, candidate)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return accounts.Account{}, err
+	case 1:
+		return matches[0], nil
+	default:
+		return accounts.Account{}, accounts.ErrAmbiguous
+	}
 }
 
 func (a *App) versionResponse() response {
@@ -422,6 +466,11 @@ func (a *App) finish(r response, err error) int {
 		}
 		if r.Plan != nil {
 			writef(a.Out, "%s %s\n", a.humanHeading("Codex:"), r.Plan.Daemon)
+			if !r.Plan.UnfinishedKnown {
+				writef(a.Out, "%s unavailable\n", a.humanHeading("Recovery journal:"))
+			} else if r.Plan.Unfinished {
+				writef(a.Out, "%s unfinished switch recorded\n", a.humanHeading("Recovery journal:"))
+			}
 			if len(r.Plan.Busy) > 0 {
 				writef(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Plan.Busy))
 			}
@@ -443,6 +492,13 @@ func (a *App) finish(r response, err error) int {
 			}
 			for _, warning := range r.Runtime.Warnings {
 				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
+			}
+		}
+		if r.Inventory != nil && !r.Inventory.Complete {
+			if r.Inventory.Error != "" {
+				writef(a.Out, "%s %s\n", a.humanHeading("Account inventory:"), r.Inventory.Error)
+			} else {
+				writef(a.Out, "%s %d saved account issue(s); healthy entries shown only\n", a.humanHeading("Account inventory:"), len(r.Inventory.Issues))
 			}
 		}
 		if r.Target != nil {

@@ -19,6 +19,11 @@ func (a *App) accountMutation(ctx context.Context, command string, args []string
 	if !filepath.IsAbs(a.StateDir) || !filepath.IsAbs(a.CodexHome) {
 		return a.finish(r, errors.New("state and Codex home paths must be absolute"))
 	}
+	if command == "import" && len(args) == 1 {
+		if err := accounts.ValidateAlias(args[0]); err != nil {
+			return a.finish(r, err)
+		}
+	}
 	release, err := operation.Lock(a.StateDir)
 	if err != nil {
 		return a.finish(r, err)
@@ -75,5 +80,34 @@ func (a *App) accountMutation(ctx context.Context, command string, args []string
 		r.Target = &target
 		r.Message = "Current login saved."
 	}
+	return a.finish(r, nil)
+}
+
+func (a *App) aliasAccount(_ context.Context, args []string) int {
+	r := response{Command: "alias"}
+	if len(args) != 2 {
+		return a.finish(r, errors.New("usage: verso alias <account> <alias>"))
+	}
+	if !filepath.IsAbs(a.StateDir) {
+		return a.finish(r, errors.New("state directory must be absolute"))
+	}
+	if err := accounts.ValidateAlias(args[1]); err != nil {
+		return a.finish(r, err)
+	}
+	release, err := operation.Lock(a.StateDir)
+	if err != nil {
+		return a.finish(r, err)
+	}
+	defer release()
+	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
+	if err != nil {
+		return a.finish(r, err)
+	}
+	target, err := store.Rename(args[0], args[1])
+	if err != nil {
+		return a.finish(r, err)
+	}
+	r.Target = &target
+	r.Message = "Account alias updated."
 	return a.finish(r, nil)
 }

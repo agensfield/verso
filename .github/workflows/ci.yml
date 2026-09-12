@@ -47,3 +47,6 @@ jobs:
 
       - name: Isolated CLI contract and cancellation flows
         run: python3 scripts/smoke/cli.py "$RUNNER_TEMP/verso"
+
+      - name: Isolated terminal progress and cleanup
+        run: python3 scripts/smoke/progress.py "$RUNNER_TEMP/verso"

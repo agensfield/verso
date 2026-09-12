@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -125,7 +124,7 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		if len(saved) == 0 {
 			return a.finish(r, errors.New("no saved accounts; run verso add first"))
 		}
-		entries, active, _, err := a.fetchQuotas(ctx, saved, false)
+		entries, active, _, _, err := a.fetchQuotas(ctx, saved, false)
 		if err != nil {
 			return a.finish(r, err)
 		}
@@ -182,47 +181,67 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 }
 
 func readAccountNumber(ctx context.Context, in io.Reader, out io.Writer, count int) (int, error) {
-	lines := make(chan string)
-	done := make(chan error, 1)
-	go func() {
-		defer close(lines)
-		scanner := bufio.NewScanner(in)
-		for scanner.Scan() {
-			select {
-			case lines <- scanner.Text():
-			case <-ctx.Done():
-				done <- ctx.Err()
-				return
-			}
-		}
-		done <- scanner.Err()
-	}()
 	for {
 		if _, err := fmt.Fprint(out, "Account number (Enter cancels): "); err != nil {
 			return 0, err
 		}
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case line, ok := <-lines:
-			if !ok {
-				readErr := <-done
-				if readErr != nil {
-					return 0, readErr
+		line, err := readLine(ctx, in, 4096)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return 0, errors.New("cancelled; no switch performed")
+			}
+			return 0, err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return 0, errors.New("cancelled; no switch performed")
+		}
+		n, parseErr := strconv.Atoi(line)
+		if parseErr == nil && n >= 1 && n <= count {
+			return n, nil
+		}
+		if _, err := fmt.Fprintf(out, "Choose a number from 1 to %d, or press Enter to cancel.\n", count); err != nil {
+			return 0, err
+		}
+	}
+}
+
+type lineResult struct {
+	line string
+	err  error
+}
+
+// readLine reads no farther than one line, so a completed picker cannot consume
+// bytes intended for the later confirmation prompt.
+func readLine(ctx context.Context, in io.Reader, limit int) (string, error) {
+	result := make(chan lineResult, 1)
+	go func() {
+		var b strings.Builder
+		one := make([]byte, 1)
+		for b.Len() < limit {
+			n, err := in.Read(one)
+			if n == 1 {
+				if one[0] == '\n' {
+					result <- lineResult{line: b.String()}
+					return
 				}
-				return 0, errors.New("cancelled; no switch performed")
+				b.WriteByte(one[0])
 			}
-			line = strings.TrimSpace(line)
-			if line == "" {
-				return 0, errors.New("cancelled; no switch performed")
-			}
-			n, parseErr := strconv.Atoi(line)
-			if parseErr == nil && n >= 1 && n <= count {
-				return n, nil
-			}
-			if _, err := fmt.Fprintf(out, "Choose a number from 1 to %d, or press Enter to cancel.\n", count); err != nil {
-				return 0, err
+			if err != nil {
+				if errors.Is(err, io.EOF) && b.Len() > 0 {
+					result <- lineResult{line: b.String()}
+				} else {
+					result <- lineResult{err: err}
+				}
+				return
 			}
 		}
+		result <- lineResult{err: errors.New("input line is too long")}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case value := <-result:
+		return value.line, value.err
 	}
 }

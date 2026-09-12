@@ -550,6 +550,12 @@ func classifyError(command string, err error) (string, string) {
 		return "invalid_alias", "choose a distinct account alias"
 	case errors.Is(err, accounts.ErrUnsafePath), errors.Is(err, accounts.ErrActiveAccount), errors.Is(err, accounts.ErrUnknownActive):
 		return "safety_refusal", "inspect with verso status --json before retrying"
+	case errors.Is(err, switcher.ErrUnfinished):
+		return "recovery_required", "run verso recovery --json"
+	case errors.Is(err, switcher.ErrUnknown):
+		return "inspection_unavailable", "run verso status --json"
+	case errors.Is(err, switcher.ErrBusy), errors.Is(err, switcher.ErrBackend), errors.Is(err, switcher.ErrChanged), errors.Is(err, switcher.ErrExhausted):
+		return "safety_refusal", "review verso preview --json before retrying"
 	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for") || strings.Contains(message, "unexpected or missing") || strings.Contains(message, "command-only flag"):
 		if _, ok := commandHelp[command]; ok && command != "options" {
 			return "invalid_arguments", "run verso help " + command

@@ -14,15 +14,15 @@ import (
 	"github.com/agensfield/verso/internal/selection"
 )
 
-func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force bool) (map[string]quota.Entry, string, string, error) {
+func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force bool) (map[string]quota.Entry, string, string, int, error) {
 	release, err := operation.Lock(a.StateDir)
 	if err != nil {
-		return nil, "", "unknown", err
+		return nil, "", "unknown", 0, err
 	}
 	defer release()
 	inspector, err := a.inspector()
 	if err != nil {
-		return nil, "", "unknown", err
+		return nil, "", "unknown", 0, err
 	}
 	observation, inspectErr := inspector.InspectSelection(ctx)
 	active := accounts.ActiveIdentity{}
@@ -36,7 +36,7 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 	}
 	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
 	if err != nil {
-		return nil, "", selectionStatus, err
+		return nil, "", selectionStatus, 0, err
 	}
 	client := a.network()
 	service := quota.Service{CheckSelection: func() error {
@@ -80,22 +80,24 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 		}
 	}
 	entries := make(map[string]quota.Entry, len(saved))
+	attempted := 0
 	// Sequential bounded requests suit the two-account alpha; no resident worker.
 	for index, account := range saved {
 		if err := ctx.Err(); err != nil {
-			return entries, activeID, selectionStatus, err
+			return entries, activeID, selectionStatus, attempted, err
 		}
 		a.progress("Checking usage: %s (%d/%d)", accountChoiceName(account), index+1, len(saved))
+		attempted++
 		entry, err := service.Refresh(ctx, account.ID, force)
 		if err != nil {
-			return entries, activeID, selectionStatus, err
+			return entries, activeID, selectionStatus, attempted, err
 		}
 		entries[account.ID] = entry
 	}
 	if err := ctx.Err(); err != nil {
-		return entries, activeID, selectionStatus, err
+		return entries, activeID, selectionStatus, attempted, err
 	}
-	return entries, activeID, selectionStatus, nil
+	return entries, activeID, selectionStatus, attempted, nil
 }
 
 func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
@@ -138,11 +140,13 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 		}
 	} else {
 		var selectionStatus string
-		r.Quotas, r.Active, selectionStatus, err = a.fetchQuotas(ctx, r.Accounts, true)
+		var attempted int
+		r.Quotas, r.Active, selectionStatus, attempted, err = a.fetchQuotas(ctx, r.Accounts, true)
 		r.Selection.Status = selectionStatus
 		if err != nil {
 			// The selection proof is no longer current, so do not render its badge.
 			r.Active = ""
+			r.Selection.Status = "unknown"
 		}
 		if err == nil {
 			// Inactive credential refresh can update list-safe account metadata.
@@ -156,17 +160,18 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 				r.Accounts, err = store.List()
 			}
 		}
+		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, attempted)
 	}
-	r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, !cached)
+	if cached {
+		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, 0)
+	}
 	r.QuotaInfo = quotaWires(r.Accounts, r.Quotas)
 	return a.finish(r, err)
 }
 
-func summarizeQuotas(saved []accounts.Account, entries map[string]quota.Entry, attempted bool) *quotaMetadata {
+func summarizeQuotas(saved []accounts.Account, entries map[string]quota.Entry, attempted int) *quotaMetadata {
 	result := &quotaMetadata{Complete: true}
-	if attempted {
-		result.Attempted = len(saved)
-	}
+	result.Attempted = attempted
 	for _, account := range saved {
 		entry, found := entries[account.ID]
 		if found && entry.Quota != nil {

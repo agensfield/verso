@@ -50,6 +50,16 @@ func TestAccountNumberRetriesAndCancelsWithContext(t *testing.T) {
 		t.Fatal("account picker ignored cancellation")
 	}
 }
+
+func TestAccountNumberLeavesConfirmationInputUnread(t *testing.T) {
+	in := strings.NewReader("1\ny\n")
+	if n, err := readAccountNumber(context.Background(), in, io.Discard, 2); err != nil || n != 1 {
+		t.Fatalf("selection = %d, %v", n, err)
+	}
+	if err := confirm(context.Background(), in, io.Discard, "Switch?"); err != nil {
+		t.Fatalf("picker consumed confirmation input: %v", err)
+	}
+}
 func TestConfirmationNeverDefaultsToApproval(t *testing.T) {
 	for _, answer := range []string{"", "\n", "no\n", "maybe\n"} {
 		if err := confirm(context.Background(), strings.NewReader(answer), new(bytes.Buffer), "Switch?"); err == nil {

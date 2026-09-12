@@ -72,7 +72,9 @@ func (j Journal) Read() (*switcher.Checkpoint, error) {
 	if !rootInfo.IsDir() || !rootOK || rootStat.Uid != uint32(os.Geteuid()) || rootInfo.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("unsafe switch journal directory")
 	}
-	f, err := os.OpenFile(filepath.Join(j.Root, "switch.json"), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK prevents a crafted FIFO or device from stalling recovery before
+	// descriptor validation can reject it. It has no effect on regular files.
+	f, err := os.OpenFile(filepath.Join(j.Root, "switch.json"), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

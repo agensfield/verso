@@ -482,26 +482,24 @@ func (a *App) finish(r response, err error) int {
 			}
 		}
 		if r.Runtime != nil {
-			writef(a.Out, "%s %s\n%s %s\n%s %s\n", a.humanHeading("Codex:"), r.Runtime.Daemon, a.humanHeading("Credentials:"), r.Runtime.Config.CredentialStore, a.humanHeading("Selected login:"), selectedAccountName(r))
-			writef(a.Out, "%s %s\n", a.humanHeading("Credential proof:"), credentialProofLabel(r.Runtime.Credential))
-			if r.Runtime.Credential.Reason != "" {
-				writef(a.Out, "%s %s\n", a.humanHeading("Credential detail:"), r.Runtime.Credential.Reason)
-			}
-			if r.Runtime.Credential.Warning != "" {
-				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), r.Runtime.Credential.Warning)
-			}
+			writef(a.Out, "%s\n", a.humanHeading("Account: "+selectedAccountName(r)))
+			writef(a.Out, "  Daemon: %s\n", r.Runtime.Daemon)
+			writef(a.Out, "  Login: %s\n", loginStatus(r.Runtime))
 			if r.Runtime.ActivityKnown {
-				writef(a.Out, "%s %s\n", a.humanHeading("Activity:"), activityLabel(len(r.Runtime.Busy)))
+				writef(a.Out, "  Conversations: %s\n", conversationStatus(len(r.Runtime.Busy)))
 			} else {
-				writef(a.Out, "%s unavailable\n", a.humanHeading("Activity:"))
-				if r.Runtime.ActivityError != "" {
-					writef(a.Out, "%s %s\n", a.humanHeading("Activity detail:"), r.Runtime.ActivityError)
+				writef(a.Out, "  Conversations: %s\n", unavailableConversationStatus(r.Runtime.ActivityError))
+			}
+			warnings := append([]string{}, r.Runtime.Warnings...)
+			if r.Runtime.Credential.Warning != "" {
+				warnings = append([]string{r.Runtime.Credential.Warning}, warnings...)
+			}
+			seenWarnings := map[string]bool{}
+			for _, warning := range warnings {
+				if warning == "" || seenWarnings[warning] {
+					continue
 				}
-			}
-			if summary := clientSummary(r.Runtime.Clients); summary != "" {
-				writef(a.Out, "%s %s\n", a.humanHeading("Process candidates:"), summary)
-			}
-			for _, warning := range r.Runtime.Warnings {
+				seenWarnings[warning] = true
 				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
 			}
 		}
@@ -509,7 +507,7 @@ func (a *App) finish(r response, err error) int {
 			if r.Inventory.Error != "" {
 				writef(a.Out, "%s %s\n", a.humanHeading("Account inventory:"), r.Inventory.Error)
 			} else {
-				writef(a.Out, "%s %d saved account issue(s); healthy entries shown only\n", a.humanHeading("Account inventory:"), len(r.Inventory.Issues))
+				writef(a.Out, "%s %s; healthy entries shown only\n", a.humanHeading("Account inventory:"), accountIssueCount(len(r.Inventory.Issues)))
 			}
 		}
 		if r.Target != nil {
@@ -696,9 +694,22 @@ func credentialProofLabel(proof codex.CredentialProof) string {
 	}
 }
 
-func activityLabel(busy int) string {
+func loginStatus(runtime *codex.Observation) string {
+	status := credentialProofLabel(runtime.Credential)
+	if runtime.Credential.Status == codex.CredentialUnknown || runtime.Credential.Status == "" {
+		if runtime.Credential.Reason != "" {
+			return status + ": " + runtime.Credential.Reason
+		}
+		if runtime.Config.CredentialStore != "" {
+			return status + "; configured store is " + runtime.Config.CredentialStore
+		}
+	}
+	return status
+}
+
+func conversationStatus(busy int) string {
 	if busy == 0 {
-		return "no busy conversations observed"
+		return "none busy observed"
 	}
 	if busy == 1 {
 		return "1 busy conversation observed"
@@ -706,21 +717,18 @@ func activityLabel(busy int) string {
 	return fmt.Sprintf("%d busy conversations observed", busy)
 }
 
-func clientSummary(clients []codex.Client) string {
-	counts := map[codex.ClientKind]int{}
-	for _, client := range clients {
-		counts[client.Kind]++
+func unavailableConversationStatus(detail string) string {
+	if detail == "" {
+		return "check unavailable"
 	}
-	parts := make([]string, 0, 3)
-	for _, item := range []struct {
-		kind  codex.ClientKind
-		label string
-	}{{codex.ClientAttached, "attached intent"}, {codex.ClientStandalone, "standalone runtime"}, {codex.ClientUnknown, "unknown role"}} {
-		if count := counts[item.kind]; count > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", count, item.label))
-		}
+	return "check unavailable: " + detail
+}
+
+func accountIssueCount(count int) string {
+	if count == 1 {
+		return "1 saved account issue"
 	}
-	return strings.Join(parts, ", ")
+	return fmt.Sprintf("%d saved account issues", count)
 }
 
 func recoveryPhase(phase string) string {

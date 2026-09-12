@@ -81,21 +81,26 @@ func TestHumanStatusAndTargetUseOperatorLabels(t *testing.T) {
 		Busy:          []string{"hidden-turn-1", "hidden-turn-2"},
 		ActivityKnown: true,
 		Clients:       []codex.Client{{PID: 4242, Kind: codex.ClientAttached}, {PID: 4343, Kind: codex.ClientUnknown}},
+		Credential:    codex.CredentialProof{Warning: "synthetic warning"},
+		Warnings:      []string{"synthetic warning"},
 	}
 	plan := &switcher.Plan{Inspection: switcher.Inspection{Daemon: switcher.Running, Busy: []string{"hidden-plan-turn"}}}
 	if code := a.finish(response{Command: "preview", Accounts: []accounts.Account{account}, Runtime: runtime, Plan: plan, Target: &account}, nil); code != 0 {
 		t.Fatal(code)
 	}
 	got := out.String()
-	for _, want := range []string{"Codex: running", "Credentials: file", "Account: personal", "Busy conversations: 1", "Activity: 2 busy conversations observed", "Process candidates: 1 attached intent, 1 unknown role"} {
+	for _, want := range []string{"Codex: running", "Busy conversations: 1", "Account: personal", "Daemon: running", "Login: unverified; configured store is file", "Conversations: 2 busy conversations observed"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
 		}
 	}
-	for _, hidden := range []string{"Target:", `"personal"`, "same@example.test", "hidden-id", "hidden-turn", "4242", "4343", "Selected file identity", "Credential mode"} {
+	for _, hidden := range []string{"Target:", `"personal"`, "same@example.test", "hidden-id", "hidden-turn", "4242", "4343", "Credential proof", "Credential detail", "Process candidates", "Selected file identity", "Credential mode"} {
 		if strings.Contains(got, hidden) {
 			t.Errorf("human output contains %q:\n%s", hidden, got)
 		}
+	}
+	if strings.Count(got, "synthetic warning") != 1 {
+		t.Fatalf("warning was duplicated: %s", got)
 	}
 	if strings.Contains(got, "\x1b[") {
 		t.Fatal("piped status contains ANSI")

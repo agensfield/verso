@@ -29,19 +29,9 @@ func (i Inspector) ownsSocket(_ context.Context, pid int, socket string) (bool, 
 	if err != nil {
 		return false, err
 	}
-	inode := ""
-	for _, line := range strings.Split(string(raw), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 8 || strings.Join(fields[7:], " ") != socket {
-			continue
-		}
-		if inode != "" && inode != fields[6] {
-			return false, errors.New("multiple socket identities share endpoint path")
-		}
-		inode = fields[6]
-	}
-	if inode == "" {
-		return false, nil
+	inode, err := listeningSocketInode(raw, socket)
+	if err != nil || inode == "" {
+		return false, err
 	}
 	dir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
 	entries, err := os.ReadDir(dir)
@@ -55,4 +45,22 @@ func (i Inspector) ownsSocket(_ context.Context, pid int, socket string) (bool, 
 		}
 	}
 	return false, nil
+}
+
+func listeningSocketInode(raw []byte, socket string) (string, error) {
+	inode := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		// Accepted Unix stream sockets can temporarily retain the listener's
+		// pathname with a different inode. Only the listening endpoint is the
+		// ownership proof: Flags has SO_ACCEPTCON and St is SS_UNCONNECTED.
+		if len(fields) < 8 || fields[3] != "00010000" || fields[5] != "01" || strings.Join(fields[7:], " ") != socket {
+			continue
+		}
+		if inode != "" && inode != fields[6] {
+			return "", errors.New("multiple socket identities share endpoint path")
+		}
+		inode = fields[6]
+	}
+	return inode, nil
 }

@@ -203,9 +203,10 @@ func TestSnapshotFailureRequiresIndependentOverride(t *testing.T) {
 
 func TestWrongTargetRollsBackOnlyAfterStoppingTarget(t *testing.T) {
 	f := fixture()
-	f.fail["verify:B"] = errors.New("wrong account")
+	cause := errors.New("wrong account")
+	f.fail["verify:B"] = cause
 	out, err := run(f)
-	if err == nil || !out.RollbackAttempted || !out.RollbackSucceeded || out.Active != "A" || out.Changed || f.cp != nil {
+	if err == nil || !errors.Is(err, cause) || errors.Is(err, ErrRecoveryRequired) || !out.RollbackAttempted || !out.RollbackSucceeded || out.Active != "A" || out.Changed || f.cp != nil {
 		t.Fatalf("out=%+v err=%v cp=%+v", out, err, f.cp)
 	}
 	events := strings.Join(f.events, ",")
@@ -216,20 +217,64 @@ func TestWrongTargetRollsBackOnlyAfterStoppingTarget(t *testing.T) {
 
 func TestRollbackFailureRetainsJournal(t *testing.T) {
 	f := fixture()
-	f.fail["verify:B"] = errors.New("wrong account")
-	f.fail["activate:A"] = errors.New("disk failed")
+	cause := errors.New("wrong account")
+	rollbackErr := errors.New("disk failed")
+	f.fail["verify:B"] = cause
+	f.fail["activate:A"] = rollbackErr
 	out, err := run(f)
-	if err == nil || !out.RollbackAttempted || out.RollbackSucceeded || f.cp == nil || f.cp.Phase != "rolling_back" {
+	if err == nil || !errors.Is(err, ErrRecoveryRequired) || !errors.Is(err, cause) || !errors.Is(err, rollbackErr) || !out.RollbackAttempted || out.RollbackSucceeded || f.cp == nil || f.cp.Phase != "rolling_back" {
 		t.Fatalf("out=%+v err=%v cp=%+v", out, err, f.cp)
 	}
 }
 
 func TestUnconfirmedStopNeverActivatesOrAutomaticallyRestarts(t *testing.T) {
 	f := fixture()
-	f.fail["stop"] = errors.New("timeout")
+	cause := errors.New("timeout")
+	f.fail["stop"] = cause
 	_, err := run(f)
-	if err == nil || has(f, "activate:B") || has(f, "start") || f.cp == nil {
+	if err == nil || !errors.Is(err, ErrRecoveryRequired) || !errors.Is(err, cause) || has(f, "activate:B") || has(f, "start") || f.cp == nil {
 		t.Fatalf("err=%v events=%v", err, f.events)
+	}
+}
+
+func TestStoppedSaveFailureRequiresRecoveryAndPreservesCause(t *testing.T) {
+	f := fixture()
+	f.states[0].Daemon = Stopped
+	cause := errors.New("unsafe account store")
+	f.fail["save:A"] = cause
+	_, err := run(f)
+	if !errors.Is(err, ErrRecoveryRequired) || !errors.Is(err, cause) || f.cp == nil || f.cp.Phase != "prepared" {
+		t.Fatalf("err=%v cp=%+v events=%v", err, f.cp, f.events)
+	}
+}
+
+func TestJournalWriteAndCleanupFailuresRequireRecovery(t *testing.T) {
+	for _, event := range []string{"journal:prepared", "journal:stopping", "journal:activating", "journal:starting", "journal:committed", "clear"} {
+		t.Run(event, func(t *testing.T) {
+			f := fixture()
+			cause := errors.New("synthetic journal failure")
+			f.fail[event] = cause
+			_, err := run(f)
+			if !errors.Is(err, ErrRecoveryRequired) || !errors.Is(err, cause) {
+				t.Fatalf("event=%s err=%v events=%v", event, err, f.events)
+			}
+		})
+	}
+}
+
+func TestRollbackJournalFailuresRequireRecovery(t *testing.T) {
+	for _, event := range []string{"journal:rolling_back", "journal:rolled_back", "clear"} {
+		t.Run(event, func(t *testing.T) {
+			f := fixture()
+			cause := errors.New("wrong target")
+			journalErr := errors.New("synthetic rollback journal failure")
+			f.fail["verify:B"] = cause
+			f.fail[event] = journalErr
+			_, err := run(f)
+			if !errors.Is(err, ErrRecoveryRequired) || !errors.Is(err, cause) || !errors.Is(err, journalErr) {
+				t.Fatalf("event=%s err=%v events=%v", event, err, f.events)
+			}
+		})
 	}
 }
 
@@ -238,7 +283,7 @@ func TestCommittedJournalFailureDoesNotUndoSuccessfulAccount(t *testing.T) {
 		f := fixture()
 		f.fail[event] = errors.New("disk failed")
 		out, err := run(f)
-		if err == nil || !out.Changed || out.Active != "B" || out.RollbackAttempted || f.cp == nil {
+		if err == nil || !errors.Is(err, ErrRecoveryRequired) || !out.Changed || out.Active != "B" || out.RollbackAttempted || f.cp == nil {
 			t.Fatalf("out=%+v err=%v cp=%+v", out, err, f.cp)
 		}
 	}

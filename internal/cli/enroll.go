@@ -44,12 +44,17 @@ func (a *App) add(ctx context.Context, args []string) int {
 	if client == nil {
 		client = auth.NewClient(auth.Config{})
 	}
+	a.progress("Starting device sign-in...")
 	raw, err := client.DeviceLogin(ctx, func(prompt auth.DevicePrompt) error {
 		// The device code is deliberately shown only in this human-initiated flow,
 		// never in stored metadata, logs, JSON results, or errors.
+		a.clearProgress()
 		_, e := fmt.Fprintf(a.Out, "Open %s and enter code %s\n", prompt.VerificationURL, prompt.UserCode)
 		if e == nil && !prompt.ExpiresAt.IsZero() {
 			_, e = fmt.Fprintf(a.Out, "This code expires at %s. Press Ctrl-C to cancel.\n", prompt.ExpiresAt.Local().Format("15:04 MST"))
+		}
+		if e == nil {
+			a.progress("Waiting for sign-in...")
 		}
 		return e
 	})

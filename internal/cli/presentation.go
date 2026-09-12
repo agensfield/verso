@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -56,17 +55,6 @@ func (a *App) environment() []string {
 		return a.Env
 	}
 	return os.Environ()
-}
-
-func (a *App) progress(format string, args ...any) {
-	if a.json {
-		return
-	}
-	errOut, ok := a.Err.(*os.File)
-	if !ok || !isatty.IsTerminal(errOut.Fd()) {
-		return
-	}
-	_, _ = fmt.Fprintf(a.Err, format+"\n", args...)
 }
 
 func accountChoiceName(account accounts.Account) string {

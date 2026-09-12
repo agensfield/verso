@@ -37,6 +37,11 @@ func (a *App) requireHuman() error {
 	return nil
 }
 
+func (a *App) confirm(ctx context.Context, prompt string) error {
+	a.clearProgress()
+	return confirm(ctx, a.In, a.Out, prompt)
+}
+
 // confirm has no implicit approval on EOF, timeout, cancellation, or empty input.
 func confirm(ctx context.Context, in io.Reader, out io.Writer, prompt string) error {
 	if err := ctx.Err(); err != nil {

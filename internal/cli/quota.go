@@ -24,6 +24,7 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 	if err != nil {
 		return nil, "", "unknown", 0, err
 	}
+	a.progress("Inspecting selected account...")
 	observation, inspectErr := inspector.InspectSelection(ctx)
 	active := accounts.ActiveIdentity{}
 	selectionStatus := "unknown"

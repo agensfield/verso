@@ -40,6 +40,7 @@ type App struct {
 	CredentialResolver codex.CredentialResolver
 	Auth               DeviceAuthenticator
 	json               bool
+	progressState      progressController
 }
 
 type response struct {
@@ -154,6 +155,8 @@ Help: verso help <command|options>     Agent guide: verso --skill
 `
 
 func (a *App) Run(ctx context.Context, args []string) int {
+	a.clearProgress()
+	defer a.clearProgress()
 	if a.In == nil {
 		a.In = os.Stdin
 	}
@@ -418,6 +421,7 @@ func contractText(contract *contractMetadata) string {
 }
 
 func (a *App) finish(r response, err error) int {
+	a.clearProgress()
 	if err != nil && r.Plan != nil && !r.Plan.UnfinishedKnown {
 		err = switcher.ErrRecoveryRequired
 	}

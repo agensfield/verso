@@ -66,17 +66,22 @@ func (a *App) backend() (*application.Backend, error) {
 		return run(ctx, "herdr", "api", "snapshot")
 	}
 	b.Reauthenticate = func(ctx context.Context, account accounts.Account) ([]byte, error) {
-		if err := confirm(ctx, a.In, a.Out, fmt.Sprintf("Reauthenticate %q before switching?", account.Alias)); err != nil {
+		if err := a.confirm(ctx, fmt.Sprintf("Reauthenticate %q before switching?", account.Alias)); err != nil {
 			return nil, err
 		}
 		client := a.Auth
 		if client == nil {
 			client = auth.NewClient(auth.Config{})
 		}
+		a.progress("Starting device sign-in...")
 		return client.DeviceLogin(ctx, func(p auth.DevicePrompt) error {
+			a.clearProgress()
 			_, err := fmt.Fprintf(a.Out, "Open %s and enter code %s\n", p.VerificationURL, p.UserCode)
 			if err == nil && !p.ExpiresAt.IsZero() {
 				_, err = fmt.Fprintf(a.Out, "This code expires at %s. Press Ctrl-C to cancel.\n", p.ExpiresAt.Local().Format("15:04 MST"))
+			}
+			if err == nil {
+				a.progress("Waiting for sign-in...")
 			}
 			return err
 		})
@@ -104,6 +109,7 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		binary = "codex"
 	}
 	versionCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	a.progress("Checking Codex version...")
 	raw, err := run(versionCtx, binary, "--version")
 	cancel()
 	if err != nil || !application.SupportedVersion(string(raw)) {
@@ -132,6 +138,7 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		if err != nil {
 			return a.finish(r, err)
 		}
+		a.clearProgress()
 		if _, err := fmt.Fprintln(a.Out, a.humanHeading("Choose account")); err != nil {
 			return a.finish(r, err)
 		}
@@ -155,6 +162,7 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 	}
 	engine := switcher.Engine{Backend: backend, OnProgress: func(phase string) { a.progress("%s", switchProgress(phase)) }}
 	result, err := engine.Execute(ctx, switcher.Request{Target: target.ID, AllowExhausted: allowExhausted, AllowNoSnapshot: allowNoSnapshot}, func(plan switcher.Plan) error {
+		a.clearProgress()
 		for _, warning := range plan.Warnings {
 			_, _ = fmt.Fprintln(a.Out, "Warning:", warning)
 		}
@@ -166,7 +174,7 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		if allowNoSnapshot {
 			_, _ = fmt.Fprintln(a.Out, "Proceeding is allowed even if Herdr recovery capture fails.")
 		}
-		return confirm(ctx, a.In, a.Out, fmt.Sprintf("Switch to %q?", target.Alias))
+		return a.confirm(ctx, fmt.Sprintf("Switch to %q?", target.Alias))
 	})
 	r.Switch = &result
 	if err == nil {

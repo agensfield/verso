@@ -542,6 +542,15 @@ func publicError(err error) error {
 		accounts.ErrReadOnly,
 	} {
 		if errors.Is(err, known) {
+			message := err.Error()
+			switch {
+			case strings.Contains(message, "cannot preserve outgoing credentials"):
+				return fmt.Errorf("cannot preserve outgoing credentials; recovery required: %w", known)
+			case strings.Contains(message, "target activation failed"):
+				return fmt.Errorf("target activation failed; recovery required: %w", known)
+			case strings.Contains(message, "rollback credential restore failed"):
+				return fmt.Errorf("rollback failed; inspect recovery before further changes: %w", known)
+			}
 			return known
 		}
 	}
@@ -638,6 +647,8 @@ func classifyError(command string, err error) (string, string) {
 		return "account_ambiguous", "use an alias or ID from verso list --cached --json"
 	case errors.Is(err, accounts.ErrInvalidAlias), errors.Is(err, accounts.ErrAliasConflict):
 		return "invalid_alias", "choose a distinct account alias"
+	case strings.Contains(message, "recovery required") || strings.Contains(message, "inspect recovery"):
+		return "recovery_required", "run verso recovery --json"
 	case errors.Is(err, accounts.ErrUnsafePath), errors.Is(err, accounts.ErrActiveAccount), errors.Is(err, accounts.ErrUnknownActive):
 		return "safety_refusal", "inspect with verso status --json before retrying"
 	case errors.Is(err, switcher.ErrUnfinished):

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -379,5 +380,17 @@ func TestAccountStoreDiagnosticsDoNotExposeUnsafeEntryNames(t *testing.T) {
 		if strings.Contains(out.String()+errOut.String(), "SENSITIVE") {
 			t.Fatalf("%s exposed unsafe entry: %s", command, out.String())
 		}
+	}
+}
+
+func TestSanitizedAccountErrorPreservesRecoveryRequirement(t *testing.T) {
+	unsafe := fmt.Errorf("cannot preserve outgoing credentials; recovery required: %w", fmt.Errorf("%w: SENSITIVE-ENTRY-NAME.json", accounts.ErrUnsafePath))
+	public := publicError(unsafe)
+	if strings.Contains(public.Error(), "SENSITIVE") || !strings.Contains(public.Error(), "recovery required") {
+		t.Fatalf("unsafe or incomplete public error: %q", public)
+	}
+	code, hint := classifyError("switch", public)
+	if code != "recovery_required" || hint != "run verso recovery --json" {
+		t.Fatalf("classification = %q, %q", code, hint)
 	}
 }

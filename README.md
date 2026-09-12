@@ -42,11 +42,13 @@ verso import personal    # Save the current native Codex login
 verso add work           # Device authorization directly into Verso's store
 verso list               # Refresh accounts and show usage
 verso list --cached      # Read saved information without refreshing
+verso alias work office # Rename a saved account
 ```
 
 Aliases are optional and default to email. Email is not a unique identity across
 workspaces; use an alias or the saved-account ID from `verso list --cached --json`
-when lookup is ambiguous. Normal output focuses on account names, remaining usage,
+when lookup is ambiguous. `verso alias <account> <name>` edits the saved label
+without changing the selected login. Normal output focuses on account names, remaining usage,
 reset times, and freshness.
 Adding an account does not activate it. Expired inactive credentials refresh
 silently when `list` fetches usage. Codex retains ownership of active-account refresh;
@@ -97,6 +99,12 @@ verso recovery --json
 verso remove old-account
 ```
 
+Status reports daemon connectivity, conversation-check completeness, and credential
+configuration separately. A connected daemon can still have an incomplete activity
+check that blocks switching. Missing `--remote` on a Codex process does not prove
+standalone execution: Codex can connect automatically. Unverified client connections
+are reported as unknown rather than as standalone sessions.
+
 Recovery reports an unfinished transaction and the latest Herdr metadata. It does
 not replay a switch or reconstruct panes. Inspect the current account/runtime
 before manual recovery, and check for existing clients before recreating them.
@@ -106,7 +114,9 @@ Private state defaults to `~/.local/share/verso` (`VERSO_HOME` or `--state-dir`)
 Native home follows `CODEX_HOME`, or `~/.codex` (`--codex-home`). `--codex-bin`
 selects the native executable. Files are private and replaced atomically; credentials
 are not encrypted separately. Protect this directory as you would your Codex login.
-`--json` is available for structured results. `list` refreshes by default; use
+`--json` is available for structured results, including help and argument failures.
+Command-specific flags are rejected on other commands before any effects.
+Output distinguishes successful inspection from incomplete or unavailable observations. `list` refreshes by default; use
 `list --cached` for a read-only view. Login and switching prompt in your terminal.
 
 Selected profiles, project overrides, and managed configurations outside the
@@ -119,7 +129,10 @@ is included.
 
 Run `verso --skill` to read the guide bundled with your installed version.
 It covers command permissions, JSON workflows, credential handling, and recovery.
-The guide is available offline without configuring an account.
+The guide is available offline without configuring an account. `verso schema --json`
+prints the bundled command/effect contract and wire-format notes. JSON includes
+explicit selection and quota-observation status; check these alongside `ok` when
+observations are partial or unavailable. Legacy v1 fields remain available.
 
 ## Development
 

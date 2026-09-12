@@ -1,15 +1,17 @@
-# Verso v0.1.0-alpha.4
+# Verso v0.1.0-alpha.5
 
 Early public alpha of the Codex account switcher.
 
-This revision makes `list` the account-and-usage view: it refreshes usage and
-inactive credentials when needed, displays compact remaining-usage bars and reset
-times, and keeps IDs in JSON. `list --cached` provides a read-only view. The separate
-`quota` command is removed.
+This revision completes the human and agent CLI flows and fixes misleading runtime
+status. Centrally attached Codex sessions started without an explicit `--remote`
+argument are no longer called standalone. Verified daemon connectivity survives an
+incomplete conversation check; switching still refuses when activity is unknown.
 
-Normal help is short, with details under `verso help <command>`. Agent instructions
-ship inside the binary at `verso --skill` (also `verso skill`). Switch safeguards
-and Codex ownership of active-account refresh are unchanged.
+- Reject misplaced command flags before mutations and preserve JSON on errors/help.
+- Reliable cancellation, honest partial quota, and safe recovery-journal inspection.
+- Editable aliases, clearer account choices, width-aware output, and useful warnings.
+- Visible progress and informative status, preview, recovery, and mutation receipts.
+- Offline machine discovery and additive structured observation/error metadata.
 
 - Direct device authorization and current-login import, with optional aliases.
 - One native Codex home, private saved accounts, demand-driven quota and inactive refresh.

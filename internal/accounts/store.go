@@ -129,7 +129,7 @@ func (s *Store) List() ([]Account, error) {
 		}
 		id := strings.TrimSuffix(name, ".json")
 		if !validUUID(id) || entry.Type()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("%w: invalid account entry %q", ErrUnsafePath, name)
+			return nil, fmt.Errorf("%w: invalid account entry", ErrUnsafePath)
 		}
 		env, err := s.load(id)
 		if err != nil {

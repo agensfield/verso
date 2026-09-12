@@ -38,6 +38,14 @@ type Account struct {
 	AccountID string `json:"account_id"`
 }
 
+// AccountIssue is a sanitized problem with one saved account entry. It never
+// contains credential data or filesystem paths.
+type AccountIssue struct {
+	ID      string `json:"id,omitempty"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 // ActiveIdentity is supplied by the caller from an authoritative live probe.
 // Known with empty IDs means the caller authoritatively observed no active
 // native ChatGPT identity. A partial pair is treated as unknown.
@@ -138,6 +146,54 @@ func (s *Store) List() ([]Account, error) {
 	return accounts, nil
 }
 
+// ListPartial returns every healthy account it can inspect and sanitized issues
+// for malformed entries. Mutations continue to use strict List and fail closed.
+func (s *Store) ListPartial() ([]Account, []AccountIssue, error) {
+	entries, err := os.ReadDir(s.root)
+	if s.readOnly && errors.Is(err, fs.ErrNotExist) {
+		return []Account{}, []AccountIssue{}, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("list accounts: %w", err)
+	}
+	listed := make([]Account, 0, len(entries))
+	issues := make([]AccountIssue, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".json")
+		if !validUUID(id) || entry.Type()&os.ModeSymlink != 0 {
+			issueID := ""
+			if validUUID(id) {
+				issueID = id
+			}
+			issues = append(issues, AccountIssue{ID: issueID, Code: "unsafe_entry", Message: "account entry has an invalid name or type"})
+			continue
+		}
+		env, loadErr := s.load(id)
+		if loadErr != nil {
+			issues = append(issues, classifyAccountIssue(id, loadErr))
+			continue
+		}
+		listed = append(listed, env.Account)
+	}
+	sort.Slice(listed, func(i, j int) bool {
+		if listed[i].Alias != listed[j].Alias {
+			return listed[i].Alias < listed[j].Alias
+		}
+		return listed[i].ID < listed[j].ID
+	})
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].ID != issues[j].ID {
+			return issues[i].ID < issues[j].ID
+		}
+		return issues[i].Code < issues[j].Code
+	})
+	return listed, issues, nil
+}
+
 func (s *Store) Find(query string) (Account, error) {
 	query = strings.TrimSpace(query)
 	if unsafeQuery(query) {
@@ -181,8 +237,20 @@ func (s *Store) Save(auth NativeAuth, alias string) (Account, error) {
 	if err != nil {
 		return Account{}, err
 	}
+	explicitAlias := alias != ""
+	if explicitAlias {
+		if err := ValidateAlias(alias); err != nil {
+			return Account{}, err
+		}
+	}
 	for _, account := range accounts {
 		if sameIdentity(account.UserID, account.AccountID, auth.UserID, auth.AccountID) {
+			if explicitAlias {
+				if err := aliasAvailable(alias, account.ID, accounts); err != nil {
+					return Account{}, err
+				}
+				account.Alias = alias
+			}
 			account.Email = auth.Email
 			if err := s.write(envelope{SchemaVersion: SchemaVersion, Account: account, Credentials: auth.raw}); err != nil {
 				return Account{}, err
@@ -191,19 +259,15 @@ func (s *Store) Save(auth NativeAuth, alias string) (Account, error) {
 		}
 	}
 
-	explicitAlias := strings.TrimSpace(alias)
-	alias = explicitAlias
-	if explicitAlias == "" {
+	if !explicitAlias {
 		alias = auth.Email
 	}
-	if invalidAlias(alias) {
-		return Account{}, ErrInvalidAlias
+	if err := ValidateAlias(alias); err != nil {
+		return Account{}, err
 	}
-	if explicitAlias != "" {
-		for _, account := range accounts {
-			if account.Alias == explicitAlias || account.Email == explicitAlias {
-				return Account{}, ErrAliasConflict
-			}
+	if explicitAlias {
+		if err := aliasAvailable(alias, "", accounts); err != nil {
+			return Account{}, err
 		}
 	}
 	id, err := s.unusedID()
@@ -215,6 +279,37 @@ func (s *Store) Save(auth NativeAuth, alias string) (Account, error) {
 		return Account{}, err
 	}
 	return account, nil
+}
+
+// Rename changes list-safe metadata only and preserves the stored credential
+// document for the resolved account.
+func (s *Store) Rename(query, alias string) (Account, error) {
+	if s.readOnly {
+		return Account{}, ErrReadOnly
+	}
+	if err := ValidateAlias(alias); err != nil {
+		return Account{}, err
+	}
+	account, err := s.Find(query)
+	if err != nil {
+		return Account{}, err
+	}
+	accounts, err := s.List()
+	if err != nil {
+		return Account{}, err
+	}
+	if err := aliasAvailable(alias, account.ID, accounts); err != nil {
+		return Account{}, err
+	}
+	env, err := s.load(account.ID)
+	if err != nil {
+		return Account{}, err
+	}
+	env.Account.Alias = alias
+	if err := s.write(env); err != nil {
+		return Account{}, err
+	}
+	return env.Account, nil
 }
 
 func (s *Store) Credentials(query string) ([]byte, error) {
@@ -430,6 +525,45 @@ func cleanRoot(root string) (string, error) {
 
 func unsafeQuery(query string) bool {
 	return query == "" || query == "." || query == ".." || strings.ContainsAny(query, `/\\`)
+}
+
+// ValidateAlias checks persisted alias syntax without reading or mutating a
+// store. An empty alias is valid and means no explicit alias was supplied.
+func ValidateAlias(alias string) error {
+	if invalidAlias(alias) {
+		return ErrInvalidAlias
+	}
+	return nil
+}
+
+func aliasAvailable(alias, ownID string, accounts []Account) error {
+	if alias == "" {
+		return nil
+	}
+	for _, account := range accounts {
+		if account.ID == ownID {
+			continue
+		}
+		if account.Alias == alias || account.Email == alias {
+			return ErrAliasConflict
+		}
+	}
+	return nil
+}
+
+func classifyAccountIssue(id string, err error) AccountIssue {
+	issue := AccountIssue{ID: id, Code: "invalid_account", Message: "account entry could not be validated"}
+	switch {
+	case errors.Is(err, ErrUnsafePath):
+		issue.Code, issue.Message = "unsafe_entry", "account entry is not a protected regular file"
+	case errors.Is(err, ErrInvalidSchema):
+		issue.Code, issue.Message = "invalid_schema", "account entry uses an unsupported schema"
+	case errors.Is(err, ErrInvalidAlias):
+		issue.Code, issue.Message = "invalid_alias", "account entry has an invalid alias"
+	case errors.Is(err, ErrIdentityMismatch), errors.Is(err, ErrNativeIdentity), errors.Is(err, ErrConflictingIdentity):
+		issue.Code, issue.Message = "identity_mismatch", "account credential identity is invalid"
+	}
+	return issue
 }
 
 func invalidAlias(alias string) bool {

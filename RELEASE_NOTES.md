@@ -1,17 +1,16 @@
-# Verso v0.1.0-alpha.5
+# Verso v0.1.0-alpha.6
 
 Early public alpha of the Codex account switcher.
 
-This revision completes the human and agent CLI flows and fixes misleading runtime
-status. Centrally attached Codex sessions started without an explicit `--remote`
-argument are no longer called standalone. Verified daemon connectivity survives an
-incomplete conversation check; switching still refuses when activity is unknown.
+This revision fixes switching after a historical Codex error and replaces permanent
+progress lines with transient terminal spinners.
 
-- Reject misplaced command flags before mutations and preserve JSON on errors/help.
-- Reliable cancellation, honest partial quota, and safe recovery-journal inspection.
-- Editable aliases, clearer account choices, width-aware output, and useful warnings.
-- Visible progress and informative status, preview, recovery, and mutation receipts.
-- Offline machine discovery and additive structured observation/error metadata.
+- Completed usage-limit errors no longer block switching after quota resets.
+  Active turns still block, as do unknown or contradictory activity responses.
+- Delayed, single-line progress covers account usage, runtime inspection, updates,
+  switching, and device sign-in. It clears before prompts and results.
+- JSON, redirected output, and dumb terminals remain free of animation; NO_COLOR
+  disables spinner color.
 
 - Direct device authorization and current-login import, with optional aliases.
 - One native Codex home, private saved accounts, demand-driven quota and inactive refresh.

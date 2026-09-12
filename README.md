@@ -101,7 +101,9 @@ verso remove old-account
 
 Status reports daemon connectivity, conversation-check completeness, and credential
 configuration separately. A connected daemon can still have an incomplete activity
-check that blocks switching. Missing `--remote` on a Codex process does not prove
+check that blocks switching. A historical error on a nonrunning thread, including
+a previous usage-limit failure, does not block switching. Codex may retain that
+error status after quota resets until the next turn starts. Missing `--remote` on a Codex process does not prove
 standalone execution: Codex can connect automatically. Unverified client connections
 are reported as unknown rather than as standalone sessions.
 
@@ -118,6 +120,9 @@ are not encrypted separately. Protect this directory as you would your Codex log
 Command-specific flags are rejected on other commands before any effects.
 Output distinguishes successful inspection from incomplete or unavailable observations. `list` refreshes by default; use
 `list --cached` for a read-only view. Login and switching prompt in your terminal.
+Slow operations show a transient spinner on interactive stderr and clear it before
+prompts and results. JSON, redirected output, and `TERM=dumb` do not animate;
+`NO_COLOR` disables color.
 
 Selected profiles, project overrides, and managed configurations outside the
 conservatively supported inspection path can cause refusal. Custom saved provider

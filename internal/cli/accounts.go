@@ -54,6 +54,7 @@ func (a *App) accountMutation(ctx context.Context, command string, args []string
 		if err = store.Remove(target.ID, selected); err != nil {
 			return a.finish(r, err)
 		}
+		r.Target = &target
 		r.Message = "Saved account removed."
 	} else {
 		if selected.UserID == "" {

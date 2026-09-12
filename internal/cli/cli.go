@@ -42,24 +42,58 @@ type App struct {
 }
 
 type response struct {
-	Active    string                 `json:"active_account_id,omitempty"`
-	Cached    bool                   `json:"cached,omitempty"`
-	Update    *updater.Result        `json:"update,omitempty"`
-	Plan      *switcher.Plan         `json:"plan,omitempty"`
-	Quotas    map[string]quota.Entry `json:"quotas,omitempty"`
-	Switch    *switcher.Result       `json:"switch_result,omitempty"`
-	Journal   *switcher.Checkpoint   `json:"unfinished_switch,omitempty"`
-	Snapshot  *herdr.Snapshot        `json:"herdr_snapshot,omitempty"`
-	Schema    string                 `json:"schema"`
-	OK        bool                   `json:"ok"`
-	Command   string                 `json:"command"`
-	Message   string                 `json:"message,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	ErrorCode string                 `json:"error_code,omitempty"`
-	Hint      string                 `json:"hint,omitempty"`
-	Accounts  []accounts.Account     `json:"accounts,omitempty"`
-	Runtime   *codex.Observation     `json:"runtime,omitempty"`
-	Target    *accounts.Account      `json:"target,omitempty"`
+	Active      string                 `json:"active_account_id,omitempty"`
+	Cached      bool                   `json:"cached,omitempty"`
+	Update      *updater.Result        `json:"update,omitempty"`
+	Plan        *switcher.Plan         `json:"plan,omitempty"`
+	Quotas      map[string]quota.Entry `json:"quotas,omitempty"`
+	Switch      *switcher.Result       `json:"switch_result,omitempty"`
+	Journal     *switcher.Checkpoint   `json:"unfinished_switch,omitempty"`
+	Snapshot    *herdr.Snapshot        `json:"herdr_snapshot,omitempty"`
+	Schema      string                 `json:"schema"`
+	OK          bool                   `json:"ok"`
+	Command     string                 `json:"command"`
+	Message     string                 `json:"message,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	ErrorCode   string                 `json:"error_code,omitempty"`
+	Hint        string                 `json:"hint,omitempty"`
+	Accounts    []accounts.Account     `json:"accounts,omitempty"`
+	Runtime     *codex.Observation     `json:"runtime,omitempty"`
+	Target      *accounts.Account      `json:"target,omitempty"`
+	VersionInfo *versionMetadata       `json:"version_info,omitempty"`
+	Contract    *contractMetadata      `json:"contract,omitempty"`
+	Selection   *selectionMetadata     `json:"selection,omitempty"`
+	QuotaState  *quotaMetadata         `json:"quota_observation,omitempty"`
+}
+
+type versionMetadata struct {
+	Version     string `json:"version"`
+	Commit      string `json:"commit"`
+	InstallKind string `json:"install_kind"`
+}
+
+type selectionMetadata struct {
+	Status string `json:"status"`
+}
+
+type quotaMetadata struct {
+	Complete  bool `json:"complete"`
+	Attempted int  `json:"attempted"`
+	Available int  `json:"available"`
+	Failed    int  `json:"failed"`
+}
+
+type commandMetadata struct {
+	Name          string   `json:"name"`
+	Flags         []string `json:"flags"`
+	Effects       []string `json:"effects"`
+	HumanRequired bool     `json:"human_required"`
+}
+
+type contractMetadata struct {
+	ResponseSchema string            `json:"response_schema"`
+	Commands       []commandMetadata `json:"commands"`
+	Notes          []string          `json:"notes"`
 }
 
 const usage = `Verso: switch Codex accounts
@@ -74,7 +108,7 @@ Usage: verso <command>
   preview <account>     Check before switching
 
 More: status, recovery, update, version, licenses
-Help: verso help <command>     Agent guide: verso --skill
+Help: verso help <command|options>     Agent guide: verso --skill
 `
 
 func (a *App) Run(ctx context.Context, args []string) int {
@@ -106,6 +140,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if err == nil {
 		err = fs.Parse(ordered)
 	}
+	// Parsing may stop before a later --json value. The invocation scan is the
+	// authority for output mode because it respects values and -- boundaries.
+	a.json = intent.json
 	if errors.Is(err, flag.ErrHelp) {
 		return a.printHelp(helpTopic(ordered))
 	}
@@ -113,19 +150,26 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return a.finish(response{Command: "usage"}, errors.New("invalid arguments; see verso --help"))
 	}
 	if *skill {
-		if len(fs.Args()) != 0 || *version || *shortVersion || *cached || *checkUpdate || *allowExhausted || *allowNoSnapshot {
+		if len(fs.Args()) != 0 || flagsOutside(intent.flags, "json", "skill", "state-dir", "codex-home", "codex-bin") {
 			return a.finish(response{Command: "skill"}, errors.New("use verso --skill without a command"))
 		}
-		return a.finish(response{Command: "skill", Message: agentGuide}, nil)
+		r := response{Command: "skill", Message: agentGuide}
+		if a.json {
+			r.Contract = machineContract()
+		}
+		return a.finish(r, nil)
 	}
 	if *version || *shortVersion {
-		if len(fs.Args()) != 0 {
+		if len(fs.Args()) != 0 || flagsOutside(intent.flags, "json", "version", "v", "state-dir", "codex-home", "codex-bin") {
 			return a.finish(response{Command: "version"}, errors.New("use --version without a command"))
 		}
-		return a.finish(response{Command: "version", Message: a.Version}, nil)
+		return a.finish(a.versionResponse(), nil)
 	}
 	pos := fs.Args()
 	if len(pos) == 0 {
+		if flagsOutside(intent.flags, "json", "state-dir", "codex-home", "codex-bin") {
+			return a.finish(response{Command: "usage"}, errors.New("command-only flag requires a command; see verso --help"))
+		}
 		if a.json {
 			return a.finish(response{Command: "help", Message: usage}, nil)
 		}
@@ -150,13 +194,24 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		if len(pos) != 0 || *cached || *checkUpdate || *allowExhausted || *allowNoSnapshot {
 			return a.finish(response{Command: command}, errors.New("usage: verso skill"))
 		}
-		return a.finish(response{Command: command, Message: agentGuide}, nil)
+		r := response{Command: command, Message: agentGuide}
+		if a.json {
+			r.Contract = machineContract()
+		}
+		return a.finish(r, nil)
+	}
+	if command == "schema" && len(pos) == 0 {
+		message := contractText(machineContract())
+		return a.finish(response{Command: command, Message: message, Contract: machineContract()}, nil)
 	}
 	if command == "licenses" && len(pos) == 0 {
 		return a.finish(response{Command: command, Message: buildinfo.Licenses}, nil)
 	}
 	if command == "version" && len(pos) == 0 {
-		return a.finish(response{Command: command, Message: a.Version}, nil)
+		return a.finish(a.versionResponse(), nil)
+	}
+	if command == "version" || command == "licenses" || command == "schema" {
+		return a.finish(response{Command: command}, fmt.Errorf("usage: verso %s", command))
 	}
 	if command == "update" {
 		return a.updateCommand(ctx, pos, *checkUpdate)
@@ -201,6 +256,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		if r.Snapshot != nil {
 			r.Message += " A Herdr checkpoint is available; use --json to view its recovery metadata. Check current panes before recreating any clients."
 		}
+		if store, openErr := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts")); openErr == nil {
+			r.Accounts, _ = store.List()
+		}
 		return a.finish(r, nil)
 	}
 	store, err := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts"))
@@ -240,6 +298,45 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	return a.finish(r, nil)
 }
 
+func (a *App) versionResponse() response {
+	return response{Command: "version", Message: a.Version, VersionInfo: &versionMetadata{Version: a.Version, Commit: buildinfo.Commit(), InstallKind: buildinfo.InstallKind()}}
+}
+
+func machineContract() *contractMetadata {
+	return &contractMetadata{
+		ResponseSchema: "verso/v1",
+		Commands: []commandMetadata{
+			{Name: "list", Flags: []string{"--cached", "--json"}, Effects: []string{"account-read", "quota-network", "credential-refresh", "quota-cache-write"}},
+			{Name: "list --cached", Flags: []string{"--json"}, Effects: []string{"account-read", "quota-cache-read"}},
+			{Name: "status", Flags: []string{"--json"}, Effects: []string{"account-read", "runtime-inspection"}},
+			{Name: "preview", Flags: []string{"--allow-exhausted", "--allow-no-snapshot", "--json"}, Effects: []string{"account-read", "runtime-inspection", "quota-cache-read"}},
+			{Name: "recovery", Flags: []string{"--json"}, Effects: []string{"journal-read", "snapshot-read"}},
+			{Name: "import", Flags: []string{"--json"}, Effects: []string{"native-selection-read", "account-write"}},
+			{Name: "alias", Flags: []string{"--json"}, Effects: []string{"account-write"}},
+			{Name: "remove", Flags: []string{"--json"}, Effects: []string{"native-selection-read", "account-delete"}},
+			{Name: "add", Flags: []string{}, Effects: []string{"device-authorization", "account-write"}, HumanRequired: true},
+			{Name: "switch", Flags: []string{"--allow-exhausted", "--allow-no-snapshot"}, Effects: []string{"credential-activation", "daemon-restart", "journal-write", "snapshot-write"}, HumanRequired: true},
+			{Name: "update", Flags: []string{"--check", "--json"}, Effects: []string{"release-network", "binary-write"}},
+			{Name: "schema", Flags: []string{"--json"}, Effects: []string{}},
+		},
+		Notes: []string{"missing observations are unknown, not false", "ok can be true when quota refresh is partial", "JSON stdout is one final document"},
+	}
+}
+
+func contractText(contract *contractMetadata) string {
+	var b strings.Builder
+	b.WriteString("verso/v1 commands and effects\n")
+	for _, command := range contract.Commands {
+		effects := "none"
+		if len(command.Effects) > 0 {
+			effects = strings.Join(command.Effects, ", ")
+		}
+		fmt.Fprintf(&b, "  %-15s %s\n", command.Name, effects)
+	}
+	b.WriteString("Use verso schema --json for flags and machine-readable metadata.")
+	return b.String()
+}
+
 func (a *App) finish(r response, err error) int {
 	r.Schema = "verso/v1"
 	r.OK = err == nil
@@ -272,7 +369,7 @@ func (a *App) finish(r response, err error) int {
 			}
 		}
 		if r.Journal != nil {
-			writef(a.Out, "Phase: %s\nPrevious: %q\nRequested: %q\n", r.Journal.Phase, r.Journal.From, r.Journal.Target)
+			writef(a.Out, "Recorded phase: %s\nPrevious account: %s\nRequested account: %s\nNext: run verso status, then inspect verso recovery --json before retrying.\n", recoveryPhase(r.Journal.Phase), checkpointAccountName(r.Accounts, r.Journal.From), checkpointAccountName(r.Accounts, r.Journal.Target))
 		}
 		if r.Switch != nil && r.Switch.RollbackAttempted {
 			if r.Switch.RollbackSucceeded {
@@ -366,6 +463,9 @@ func scanInvocation(args []string) invocationIntent {
 }
 
 func validateCommandFlags(command string, seen map[string]bool) error {
+	if !knownCommand(command) {
+		return nil
+	}
 	global := map[string]bool{"json": true, "state-dir": true, "codex-home": true, "codex-bin": true, "help": true}
 	allowed := map[string]map[string]bool{
 		"list": {"cached": true}, "switch": {"allow-exhausted": true, "allow-no-snapshot": true},
@@ -380,17 +480,46 @@ func validateCommandFlags(command string, seen map[string]bool) error {
 	return nil
 }
 
+func knownCommand(command string) bool {
+	switch command {
+	case "help", "skill", "schema", "licenses", "version", "update", "list", "switch", "import", "remove", "add", "alias", "recovery", "status", "preview":
+		return true
+	default:
+		return false
+	}
+}
+
+func flagsOutside(seen map[string]bool, allowed ...string) bool {
+	wanted := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		wanted[name] = true
+	}
+	for name := range seen {
+		if !wanted[name] {
+			return true
+		}
+	}
+	return false
+}
+
 func classifyError(command string, err error) (string, string) {
 	message := err.Error()
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "cancelled", "retry when ready"
-	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for"):
-		return "invalid_arguments", "run verso help " + command
-	case strings.Contains(message, "not found"):
+	case errors.Is(err, accounts.ErrNotFound):
 		return "account_not_found", "run verso list --cached"
-	case strings.Contains(message, "ambiguous"):
+	case errors.Is(err, accounts.ErrAmbiguous):
 		return "account_ambiguous", "use an alias or ID from verso list --cached --json"
+	case errors.Is(err, accounts.ErrInvalidAlias), errors.Is(err, accounts.ErrAliasConflict):
+		return "invalid_alias", "choose a distinct account alias"
+	case errors.Is(err, accounts.ErrUnsafePath), errors.Is(err, accounts.ErrActiveAccount), errors.Is(err, accounts.ErrUnknownActive):
+		return "safety_refusal", "inspect with verso status --json before retrying"
+	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for") || strings.Contains(message, "unexpected or missing") || strings.Contains(message, "command-only flag"):
+		if _, ok := commandHelp[command]; ok && command != "options" {
+			return "invalid_arguments", "run verso help " + command
+		}
+		return "invalid_arguments", "run verso --help"
 	case strings.Contains(message, "unfinished") || strings.Contains(message, "recovery"):
 		return "recovery_required", "run verso recovery --json"
 	case strings.Contains(message, "unknown command"):
@@ -411,10 +540,49 @@ func writeExit(out io.Writer, value string) int {
 }
 
 func credentialProofLabel(proof codex.CredentialProof) string {
-	if proof.Status == "" {
+	switch proof.Status {
+	case codex.CredentialFileSelected:
+		return "selected login matches effective file mode"
+	case codex.CredentialFreshProcess:
+		return "selected login verified in a fresh Codex process"
+	case codex.CredentialUnknown, "":
+		return "unverified"
+	default:
+		return "unverified (see JSON for status)"
+	}
+}
+
+func recoveryPhase(phase string) string {
+	switch phase {
+	case "prepared":
+		return "prepared, no runtime change recorded"
+	case "stopping":
+		return "stopping the previous runtime"
+	case "activating":
+		return "saving the requested credentials"
+	case "starting":
+		return "starting the requested runtime"
+	case "committed":
+		return "verification completed, cleanup incomplete"
+	case "rolling_back":
+		return "restoring the previous account"
+	case "rolled_back":
+		return "previous account restored, cleanup incomplete"
+	default:
 		return "unknown"
 	}
-	return string(proof.Status)
+}
+
+func checkpointAccountName(saved []accounts.Account, id string) string {
+	if id == "" {
+		return "none recorded"
+	}
+	for _, account := range saved {
+		if account.ID == id {
+			return accountChoiceName(account)
+		}
+	}
+	return "unresolved saved account"
 }
 
 // flagsFirst permits familiar `verso list --json` without a custom flag parser.

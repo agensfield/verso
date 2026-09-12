@@ -203,6 +203,7 @@ func TestJSONIntentSurvivesParseAndHelp(t *testing.T) {
 	for _, args := range [][]string{
 		{"--json", "--bogus"},
 		{"list", "--cached=nah", "--json"},
+		{"--json=false", "list", "--cached=nah", "--json"},
 		{"--json", "--state-dir"},
 		{"--json"},
 		{"help", "list", "--json"},
@@ -219,11 +220,50 @@ func TestJSONIntentSurvivesParseAndHelp(t *testing.T) {
 		}
 	}
 
+	a, out, _ := appFixture(t)
+	a.Run(context.Background(), []string{"--json", "list", "--cached=nah", "--json=false"})
+	if out.Len() != 0 {
+		t.Fatalf("final --json=false did not select human output: %q", out.String())
+	}
+
 	// A token consumed as a string flag value is not output intent.
 	a, _, errOut := appFixture(t)
 	a.Run(context.Background(), []string{"--state-dir", "--json", "--bogus"})
 	if !strings.Contains(errOut.String(), "verso:") {
 		t.Fatalf("consumed --json incorrectly enabled JSON: %q", errOut.String())
+	}
+}
+
+func TestUnknownCommandDiagnosticsDoNotEchoTerminalControls(t *testing.T) {
+	a, _, errOut := appFixture(t)
+	command := "unknown\x1b[2J"
+	if code := a.Run(context.Background(), []string{command, "--check"}); code == 0 {
+		t.Fatal("unknown command succeeded")
+	}
+	if strings.Contains(errOut.String(), command) || strings.Contains(errOut.String(), "\x1b") {
+		t.Fatalf("unsafe command reached diagnostic: %q", errOut.String())
+	}
+}
+
+func TestOfflineSchemaAndTypedVersionMetadata(t *testing.T) {
+	for _, args := range [][]string{{"schema", "--json"}, {"version", "--json"}, {"--version", "--json"}, {"--skill", "--json"}} {
+		a, out, _ := appFixture(t)
+		if code := a.Run(context.Background(), args); code != 0 {
+			t.Fatalf("%v exited %d: %s", args, code, out.String())
+		}
+		var result response
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil || !result.OK {
+			t.Fatalf("%v: %s", args, out.String())
+		}
+		if result.Command == "version" && (result.VersionInfo == nil || result.VersionInfo.Version != "test") {
+			t.Fatalf("missing version metadata: %s", out.String())
+		}
+		if (result.Command == "schema" || result.Command == "skill") && (result.Contract == nil || len(result.Contract.Commands) == 0) {
+			t.Fatalf("missing contract metadata: %s", out.String())
+		}
+		if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
+			t.Fatalf("offline command touched state: %v", args)
+		}
 	}
 }
 

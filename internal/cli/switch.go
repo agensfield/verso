@@ -122,7 +122,7 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		if len(saved) == 0 {
 			return a.finish(r, errors.New("no saved accounts; run verso add first"))
 		}
-		entries, active, err := a.fetchQuotas(ctx, saved, false)
+		entries, active, _, err := a.fetchQuotas(ctx, saved, false)
 		if err != nil {
 			return a.finish(r, err)
 		}

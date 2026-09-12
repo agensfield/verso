@@ -257,7 +257,7 @@ func TestManagedRPCBusyAndIdle(t *testing.T) {
 			i, _ := managedFixture(t, status)
 			o, err := i.Inspect(context.Background())
 			if status == "systemError" {
-				if err == nil || o.Daemon != switcher.Unknown {
+				if err == nil || o.Daemon != switcher.Running || o.ActivityKnown || o.ActivityError == "" {
 					t.Fatalf("%+v %v", o, err)
 				}
 				return
@@ -267,6 +267,9 @@ func TestManagedRPCBusyAndIdle(t *testing.T) {
 			}
 			if o.Credential.Status != CredentialFileSelected {
 				t.Fatalf("credential=%+v", o.Credential)
+			}
+			if !o.ActivityKnown || o.ActivityError != "" {
+				t.Fatalf("activity=%t error=%q", o.ActivityKnown, o.ActivityError)
 			}
 			if (status == "active") != (len(o.Busy) == 1) {
 				t.Fatalf("busy=%v", o.Busy)
@@ -381,7 +384,7 @@ func TestCustomBinaryAndPrivateServers(t *testing.T) {
 		unknown  bool
 		warnings int
 	}{
-		{"/opt/codex-next app-server --listen unix://", true, 0},
+		{"/opt/codex-next app-server --listen unix://", true, 1},
 		{"/opt/codex-next app-server", false, 1},
 		{"/opt/codex-next app-server --listen=stdio://", false, 1},
 		{"/opt/codex-next app-server proxy", false, 0},
@@ -428,7 +431,190 @@ func TestSelectionInspectionDoesNotRequireHealthyThreads(t *testing.T) {
 	if err != nil || selected.Daemon != switcher.Running || selected.Credential.Status != CredentialFileSelected {
 		t.Fatalf("%+v %v", selected.Credential, err)
 	}
+	if selected.ActivityKnown || selected.ActivityError != "not inspected" {
+		t.Fatalf("selection activity = %t %q", selected.ActivityKnown, selected.ActivityError)
+	}
 	if _, err := i.Inspect(context.Background()); err == nil {
 		t.Fatal("switch inspection ignored unhealthy activity")
+	}
+}
+
+func TestCommandMetadataNeverProvesClientAttachment(t *testing.T) {
+	socket := "/tmp/codex/app-server-control/app-server-control.sock"
+	for _, tc := range []struct {
+		args []string
+	}{
+		{[]string{"codex", "resume", "thread"}},
+		{[]string{"codex", "--remote", "unix://" + socket, "resume", "thread"}},
+		{[]string{"codex", "explain", "--remote=unix://" + socket, "safely"}},
+		{[]string{"codex", "--", "prompt", "--remote=unix://" + socket}},
+	} {
+		role, _ := classifyProcessRole(tc.args)
+		if role != processCandidate && role != processUncertain {
+			t.Fatalf("%v role=%v", tc.args, role)
+		}
+	}
+}
+
+func TestRemoteTextRemainsUnverifiedInObservation(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		fails   bool
+	}{
+		{"/bin/codex --remote unix://SOCKET resume synthetic-thread", false},
+		{"/bin/codex explain --remote=unix://SOCKET safely", false},
+	} {
+		home := t.TempDir()
+		testNativeAuth(t, home)
+		i := Inspector{Home: home}
+		command := strings.ReplaceAll(tc.command, "SOCKET", i.Socket())
+		i.Run = func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("1234 " + command + "\n"), nil
+		}
+		o, err := i.Inspect(context.Background())
+		if (err != nil) != tc.fails || len(o.Clients) != 1 || o.Clients[0].Kind != ClientUnknown || len(o.Warnings) != 1 {
+			t.Fatalf("command=%q observation=%+v err=%v", command, o, err)
+		}
+	}
+}
+
+func TestGlobalOptionsDoNotHideAppServer(t *testing.T) {
+	for _, command := range []string{
+		"/bin/codex app-server --listen unix:///tmp/other.sock",
+		"/bin/codex -c model=synthetic app-server --listen unix:///tmp/other.sock",
+		`/bin/codex -c model="hello world" app-server --listen unix:///tmp/other.sock`,
+		`/bin/codex app-server -c model="hello daemon world" --listen unix:///tmp/other.sock`,
+	} {
+		home := t.TempDir()
+		testNativeAuth(t, home)
+		i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("1234 " + command + "\n"), nil
+		}}
+		o, err := i.Inspect(context.Background())
+		if err == nil || o.Daemon != switcher.Unknown || o.ActivityKnown {
+			t.Fatalf("command=%q observation=%+v err=%v", command, o, err)
+		}
+	}
+}
+
+func TestOrdinaryRootValueOptionRemainsAdvisory(t *testing.T) {
+	for _, command := range []string{
+		"/bin/codex -m synthetic-model resume synthetic-thread",
+		"/bin/codex -c model=synthetic resume synthetic-thread",
+		`/bin/codex -c model="hello world" resume synthetic-thread`,
+		"/bin/codex --image /tmp/synthetic.png resume synthetic-thread",
+	} {
+		home := t.TempDir()
+		testNativeAuth(t, home)
+		i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("1234 " + command + "\n"), nil
+		}}
+		o, err := i.Inspect(context.Background())
+		if err != nil || o.Daemon != switcher.Stopped || !o.ActivityKnown || len(o.Clients) != 1 || o.Clients[0].Kind != ClientUnknown {
+			t.Fatalf("command=%q observation=%+v err=%v", command, o, err)
+		}
+	}
+}
+
+func TestAmbiguousOptionProcessRemainsInRunningInventory(t *testing.T) {
+	i, _ := managedFixture(t, "idle")
+	run := i.Run
+	i.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		raw, err := run(ctx, name, args...)
+		if name == "ps" && len(args) > 0 && args[0] == "-u" {
+			raw = append(raw, []byte("987654 /bin/codex --image /tmp/synthetic.png resume synthetic-thread\n")...)
+		}
+		return raw, err
+	}
+	o, err := i.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, client := range o.Clients {
+		if client.PID == 987654 && client.Kind == ClientUnknown && client.Basis == "command-metadata-unverified" {
+			return
+		}
+	}
+	t.Fatalf("uncertain process missing: clients=%+v warnings=%v", o.Clients, o.Warnings)
+}
+
+func TestManagedRootOverrideRemainsFailClosed(t *testing.T) {
+	i, _ := managedFixture(t, "idle")
+	run := i.Run
+	i.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		raw, err := run(ctx, name, args...)
+		if name == "ps" && len(args) > 0 && args[0] == "-u" {
+			raw = []byte(strings.ReplaceAll(string(raw), "/bin/codex app-server", "/bin/codex -c model=synthetic app-server"))
+		}
+		return raw, err
+	}
+	o, err := i.Inspect(context.Background())
+	if err != nil || o.Daemon != switcher.Running || o.Credential.Status != CredentialUnknown {
+		t.Fatalf("observation=%+v err=%v", o, err)
+	}
+}
+
+func TestUncertainOtherServerDoesNotPoisonManagedConfig(t *testing.T) {
+	i, _ := managedFixture(t, "idle")
+	run := i.Run
+	i.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		raw, err := run(ctx, name, args...)
+		if name == "ps" && len(args) > 0 && args[0] == "-u" {
+			raw = append([]byte("987654 /bin/codex -c model=other app-server --listen unix:///tmp/other.sock\n"), raw...)
+		}
+		return raw, err
+	}
+	o, err := i.Inspect(context.Background())
+	if err != nil || o.Credential.Status != CredentialFileSelected {
+		t.Fatalf("observation=%+v err=%v", o, err)
+	}
+}
+
+func TestTerminalUtilityFlagIsNotAProcessCandidate(t *testing.T) {
+	home := t.TempDir()
+	testNativeAuth(t, home)
+	i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("1234 /bin/codex --version\n"), nil
+	}}
+	o, err := i.Inspect(context.Background())
+	if err != nil || len(o.Clients) != 0 || len(o.Warnings) != 0 {
+		t.Fatalf("observation=%+v err=%v", o, err)
+	}
+}
+
+func TestUtilityLookingPositionalTextRemainsACandidate(t *testing.T) {
+	home := t.TempDir()
+	testNativeAuth(t, home)
+	i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("1235 /bin/codex login status\n"), nil
+	}}
+	o, err := i.Inspect(context.Background())
+	if err != nil || len(o.Clients) != 1 || o.Clients[0].Kind != ClientUnknown {
+		t.Fatalf("observation=%+v err=%v", o, err)
+	}
+}
+
+func TestClientInventoryIsBoundedAndWarningsAreAggregated(t *testing.T) {
+	home := t.TempDir()
+	testNativeAuth(t, home)
+	var processList strings.Builder
+	for n := 0; n < maxClientInventory+2; n++ {
+		processList.WriteString(strconv.Itoa(1000 + n))
+		processList.WriteString(" /bin/codex resume synthetic-thread\n")
+	}
+	i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(processList.String()), nil
+	}}
+	o, err := i.Inspect(context.Background())
+	if err != nil || len(o.Clients) != maxClientInventory {
+		t.Fatalf("clients=%d err=%v", len(o.Clients), err)
+	}
+	if len(o.Warnings) != 2 || !strings.Contains(o.Warnings[0], "130 Codex process candidates") || !strings.Contains(o.Warnings[1], "limited to 128") {
+		t.Fatalf("warnings=%v", o.Warnings)
+	}
+	for _, warning := range o.Warnings {
+		if strings.Contains(warning, "1000") {
+			t.Fatalf("warning leaked per-process identity: %q", warning)
+		}
 	}
 }

@@ -89,10 +89,12 @@ type selectionMetadata struct {
 }
 
 type quotaMetadata struct {
-	Complete  bool `json:"complete"`
-	Attempted int  `json:"attempted"`
-	Available int  `json:"available"`
-	Failed    int  `json:"failed"`
+	Source    string `json:"source"`
+	Complete  bool   `json:"complete"`
+	Attempted int    `json:"attempted"`
+	Available int    `json:"available"`
+	Failed    int    `json:"failed"`
+	Skipped   int    `json:"skipped"`
 }
 
 type quotaWire struct {

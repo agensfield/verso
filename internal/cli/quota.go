@@ -126,7 +126,11 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 	}
 	if len(r.Accounts) == 0 {
 		r.Message = "No accounts saved. Import the current login with `verso import personal`, or add another with `verso add work`."
-		r.QuotaState = &quotaMetadata{Complete: true}
+		source := "refresh"
+		if cached {
+			source = "cache"
+		}
+		r.QuotaState = &quotaMetadata{Source: source, Complete: true}
 		return a.finish(r, nil)
 	}
 	if cached {
@@ -160,26 +164,33 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 				r.Accounts, err = store.List()
 			}
 		}
-		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, attempted)
+		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, attempted, true)
 	}
 	if cached {
-		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, 0)
+		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, 0, false)
 	}
 	r.QuotaInfo = quotaWires(r.Accounts, r.Quotas)
 	return a.finish(r, err)
 }
 
-func summarizeQuotas(saved []accounts.Account, entries map[string]quota.Entry, attempted int) *quotaMetadata {
-	result := &quotaMetadata{Complete: true}
+func summarizeQuotas(saved []accounts.Account, entries map[string]quota.Entry, attempted int, refresh bool) *quotaMetadata {
+	result := &quotaMetadata{Source: "cache", Complete: true}
 	result.Attempted = attempted
+	successful := 0
 	for _, account := range saved {
 		entry, found := entries[account.ID]
 		if found && entry.Quota != nil {
 			result.Available++
-		} else {
-			result.Failed++
-			result.Complete = false
 		}
+		if found && entry.Warning == "" {
+			successful++
+		}
+	}
+	if refresh {
+		result.Source = "refresh"
+		result.Failed = max(0, attempted-successful)
+		result.Skipped = max(0, len(saved)-attempted)
+		result.Complete = result.Failed == 0 && result.Skipped == 0
 	}
 	return result
 }

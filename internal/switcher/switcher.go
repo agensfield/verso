@@ -60,14 +60,22 @@ type Result struct {
 }
 
 var (
-	ErrUnknown    = errors.New("Codex runtime or active identity is unknown; no switch performed")
-	ErrBackend    = errors.New("explicit file-backed Codex credentials are required")
-	ErrBusy       = errors.New("active Codex turns block this switch")
-	ErrExhausted  = errors.New("target quota is exhausted; explicit override required")
-	ErrChanged    = errors.New("switch conditions changed after approval; review a new preview")
-	ErrUnfinished = errors.New("an unfinished switch needs human recovery before another switch")
-	ErrHuman      = errors.New("human approval is required")
+	ErrUnknown          = errors.New("Codex runtime or active identity is unknown; no switch performed")
+	ErrBackend          = errors.New("explicit file-backed Codex credentials are required")
+	ErrBusy             = errors.New("active Codex turns block this switch")
+	ErrExhausted        = errors.New("target quota is exhausted; explicit override required")
+	ErrChanged          = errors.New("switch conditions changed after approval; review a new preview")
+	ErrUnfinished       = errors.New("an unfinished switch needs human recovery before another switch")
+	ErrRecoveryRequired = errors.New("switch state requires human recovery")
+	ErrHuman            = errors.New("human approval is required")
 )
+
+func recoveryRequired(err error) error {
+	if err == nil || errors.Is(err, ErrRecoveryRequired) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrRecoveryRequired, err)
+}
 
 // Backend implementations must sanitize errors and keep Inspect strictly read-only.
 // Lock serializes Verso operations only. Stop must positively establish daemon exit.
@@ -199,7 +207,7 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 	cp := Checkpoint{Version: 1, From: p.Active, Target: req.Target, HadDaemon: p.Daemon == Running, Phase: "prepared"}
 	write := func(phase string) error {
 		cp.Phase = phase
-		return e.Backend.WriteCheckpoint(ctx, cp)
+		return recoveryRequired(e.Backend.WriteCheckpoint(ctx, cp))
 	}
 	if err := write("prepared"); err != nil {
 		return out, err
@@ -210,13 +218,13 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 		}
 		e.progress("stopping")
 		if err := e.Backend.Stop(ctx); err != nil {
-			return out, fmt.Errorf("daemon stop could not be confirmed; credentials unchanged, recovery required: %w", err)
+			return out, recoveryRequired(fmt.Errorf("daemon stop could not be confirmed; credentials unchanged: %w", err))
 		}
 	}
 	// From this point a stopped daemon may need recovery even before activation.
 	e.progress("saving")
 	if err := e.Backend.SaveActive(ctx, p.Active); err != nil {
-		return out, fmt.Errorf("cannot preserve outgoing credentials; recovery required: %w", err)
+		return out, recoveryRequired(fmt.Errorf("cannot preserve outgoing credentials: %w", err))
 	}
 	if err := write("activating"); err != nil {
 		return out, err
@@ -228,7 +236,7 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 	}
 	if cp.HadDaemon {
 		if err := write("starting"); err != nil {
-			return out, fmt.Errorf("target credentials installed but journal update failed; recovery required: %w", err)
+			return out, fmt.Errorf("target credentials installed but journal update failed: %w", err)
 		}
 		e.progress("starting")
 		if err := e.Backend.Start(ctx); err != nil {
@@ -242,11 +250,11 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 	out.Active, out.Changed = req.Target, true
 	out.ActiveKnown = true
 	if err := write("committed"); err != nil {
-		return out, fmt.Errorf("account switched and verified, but journal needs recovery: %w", err)
+		return out, fmt.Errorf("account switched and verified, but journal update failed: %w", err)
 	}
 	e.progress("committed")
 	if err := e.Backend.ClearCheckpoint(ctx); err != nil {
-		return out, fmt.Errorf("account switched and verified, but journal cleanup failed: %w", err)
+		return out, recoveryRequired(fmt.Errorf("account switched and verified, but journal cleanup failed: %w", err))
 	}
 	// Client connectivity is intentionally not a success/rollback condition.
 	return out, nil
@@ -263,33 +271,33 @@ func (e Engine) rollback(ctx context.Context, cp Checkpoint, out Result, cause e
 	cp.Phase = "rolling_back"
 	e.progress("rolling_back")
 	if err := e.Backend.WriteCheckpoint(ctx, cp); err != nil {
-		return out, errors.Join(cause, fmt.Errorf("cannot journal rollback; human recovery required: %w", err))
+		return out, errors.Join(cause, recoveryRequired(fmt.Errorf("cannot journal rollback: %w", err)))
 	}
 	// Never overwrite credentials beneath a possibly running target daemon.
 	if cp.HadDaemon {
 		if err := e.Backend.Stop(ctx); err != nil {
-			return out, errors.Join(cause, fmt.Errorf("rollback cannot confirm daemon stopped: %w", err))
+			return out, errors.Join(cause, recoveryRequired(fmt.Errorf("rollback cannot confirm daemon stopped: %w", err)))
 		}
 	}
 	if err := e.Backend.Activate(ctx, cp.From); err != nil {
-		return out, errors.Join(cause, fmt.Errorf("rollback credential restore failed: %w", err))
+		return out, errors.Join(cause, recoveryRequired(fmt.Errorf("rollback credential restore failed: %w", err)))
 	}
 	if cp.HadDaemon {
 		if err := e.Backend.Start(ctx); err != nil {
-			return out, errors.Join(cause, fmt.Errorf("rollback daemon start failed: %w", err))
+			return out, errors.Join(cause, recoveryRequired(fmt.Errorf("rollback daemon start failed: %w", err)))
 		}
 	}
 	if err := e.Backend.Verify(ctx, cp.From, cp.HadDaemon); err != nil {
-		return out, errors.Join(cause, fmt.Errorf("rollback account verification failed: %w", err))
+		return out, errors.Join(cause, recoveryRequired(fmt.Errorf("rollback account verification failed: %w", err)))
 	}
 	out.Active, out.RollbackSucceeded = cp.From, true
 	out.ActiveKnown = true
 	cp.Phase = "rolled_back"
 	if err := e.Backend.WriteCheckpoint(ctx, cp); err != nil {
-		return out, errors.Join(cause, err)
+		return out, errors.Join(cause, recoveryRequired(fmt.Errorf("cannot record completed rollback: %w", err)))
 	}
 	if err := e.Backend.ClearCheckpoint(ctx); err != nil {
-		return out, errors.Join(cause, err)
+		return out, errors.Join(cause, recoveryRequired(fmt.Errorf("cannot clear completed rollback journal: %w", err)))
 	}
 	return out, cause
 }

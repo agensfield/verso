@@ -469,7 +469,7 @@ func TestListPartialReturnsHealthyAccountsAndSanitizedIssues(t *testing.T) {
 	if err := os.WriteFile(store.accountPath(badID), []byte(bad), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(store.root, "private-name.json"), []byte("must-not-leak"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(store.root, "000-private-name.json"), []byte("must-not-leak"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	listed, issues, err := store.ListPartial()
@@ -478,6 +478,8 @@ func TestListPartialReturnsHealthyAccountsAndSanitizedIssues(t *testing.T) {
 	}
 	if _, err := store.List(); err == nil {
 		t.Fatal("strict List accepted malformed inventory")
+	} else if !errors.Is(err, ErrUnsafePath) || strings.Contains(err.Error(), "private-name") {
+		t.Fatalf("strict List exposed an unsafe filename: %v", err)
 	}
 	if found, err := store.Find(healthy.ID); err != nil || found != healthy {
 		t.Fatalf("exact healthy lookup failed: found=%#v err=%v", found, err)

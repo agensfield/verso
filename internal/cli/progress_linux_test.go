@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -235,7 +236,7 @@ func TestProgressPTYFastOperationNeverDraws(t *testing.T) {
 
 func TestEnrollmentPTYClearsForDeviceCodeAndResult(t *testing.T) {
 	pty := newPTYCapture(t, 80)
-	a := &App{StateDir: t.TempDir(), Out: pty.slave, Err: pty.slave, Env: []string{"TERM=xterm"}}
+	a := &App{StateDir: filepath.Join(t.TempDir(), "state"), Out: pty.slave, Err: pty.slave, Env: []string{"TERM=xterm"}}
 	release := make(chan struct{})
 	a.Auth = deviceFunc(func(_ context.Context, prompt func(auth.DevicePrompt) error) ([]byte, error) {
 		if err := prompt(auth.DevicePrompt{VerificationURL: "https://example.test/device", UserCode: "SYNTHETIC-CODE"}); err != nil {

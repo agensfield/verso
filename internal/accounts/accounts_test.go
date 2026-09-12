@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -143,7 +144,7 @@ func TestStoreSaveListAndCredentials(t *testing.T) {
 	}
 }
 
-func TestSaveReenrollmentPreservesIDAndAlias(t *testing.T) {
+func TestSaveReenrollmentAppliesExplicitAlias(t *testing.T) {
 	store := mustOpen(t)
 	first := mustParse(t, authFixture(t, "user", "workspace", "old@example.com", "old-secret", nil))
 	account, err := store.Save(first, "work")
@@ -151,11 +152,11 @@ func TestSaveReenrollmentPreservesIDAndAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := mustParse(t, authFixture(t, "user", "workspace", "new@example.com", "new-secret", nil))
-	updated, err := store.Save(second, "ignored-new-alias")
+	updated, err := store.Save(second, "new-alias")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.ID != account.ID || updated.Alias != "work" || updated.Email != "new@example.com" {
+	if updated.ID != account.ID || updated.Alias != "new-alias" || updated.Email != "new@example.com" {
 		t.Fatalf("re-enrollment lost stable metadata: before=%#v after=%#v", account, updated)
 	}
 	credentials, err := store.Credentials(account.ID)
@@ -164,6 +165,83 @@ func TestSaveReenrollmentPreservesIDAndAlias(t *testing.T) {
 	}
 	if strings.Contains(string(credentials), "old-secret") || !strings.Contains(string(credentials), "new-secret") {
 		t.Fatalf("credentials were not replaced: %s", credentials)
+	}
+}
+
+func TestSaveReenrollmentWithoutAliasPreservesAlias(t *testing.T) {
+	store := mustOpen(t)
+	first := mustParse(t, authFixture(t, "user", "workspace", "old@example.com", "old-secret", nil))
+	account, err := store.Save(first, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := mustParse(t, authFixture(t, "user", "workspace", "new@example.com", "new-secret", nil))
+	updated, err := store.Save(second, "")
+	if err != nil || updated.ID != account.ID || updated.Alias != "work" {
+		t.Fatalf("updated=%#v err=%v", updated, err)
+	}
+}
+
+func TestSaveReenrollmentRevalidatesAliasAgainstOtherAccounts(t *testing.T) {
+	store := mustOpen(t)
+	first, err := store.Save(mustParse(t, authFixture(t, "user-one", "workspace", "one@example.com", "old-secret", nil)), "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(mustParse(t, authFixture(t, "user-two", "workspace", "two@example.com", "other-secret", nil)), "second"); err != nil {
+		t.Fatal(err)
+	}
+	reauth := mustParse(t, authFixture(t, "user-one", "workspace", "one@example.com", "new-secret", nil))
+	if _, err := store.Save(reauth, "second"); !errors.Is(err, ErrAliasConflict) {
+		t.Fatalf("collision error=%v", err)
+	}
+	raw, err := store.Credentials(first.ID)
+	if err != nil || !strings.Contains(string(raw), "old-secret") || strings.Contains(string(raw), "new-secret") {
+		t.Fatal("rejected alias collision changed credentials")
+	}
+	updated, err := store.Save(reauth, "first")
+	if err != nil || updated.ID != first.ID || updated.Alias != "first" {
+		t.Fatalf("same-account alias rejected: updated=%#v err=%v", updated, err)
+	}
+}
+
+func TestRenameValidatesCollisionsAndPreservesCredentials(t *testing.T) {
+	store := mustOpen(t)
+	first, err := store.Save(mustParse(t, authFixture(t, "user-one", "workspace", "one@example.com", "secret-one", nil)), "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Save(mustParse(t, authFixture(t, "user-two", "workspace", "two@example.com", "secret-two", nil)), "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Credentials(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range []string{"second", second.Email} {
+		if _, err := store.Rename(first.ID, alias); !errors.Is(err, ErrAliasConflict) {
+			t.Fatalf("alias %q: err=%v", alias, err)
+		}
+	}
+	renamed, err := store.Rename(first.ID, first.Email)
+	if err != nil || renamed.Alias != first.Email || renamed.ID != first.ID {
+		t.Fatalf("renamed=%#v err=%v", renamed, err)
+	}
+	after, err := store.Credentials(first.ID)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("Rename changed stored credential bytes")
+	}
+}
+
+func TestValidateAliasRejectsUnsafeSyntax(t *testing.T) {
+	if err := ValidateAlias(""); err != nil {
+		t.Fatalf("empty optional alias: %v", err)
+	}
+	for _, alias := range []string{" spaced ", "../escape", "123e4567-e89b-42d3-a456-426614174000"} {
+		if !errors.Is(ValidateAlias(alias), ErrInvalidAlias) {
+			t.Fatalf("alias %q accepted", alias)
+		}
 	}
 }
 
@@ -238,6 +316,9 @@ func TestOpenReadOnlyDoesNotMutateFilesystem(t *testing.T) {
 	}
 	if _, err := store.UpdateCredentials("x", auth); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("read-only UpdateCredentials returned %v", err)
+	}
+	if _, err := store.Rename("x", "renamed"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("read-only Rename returned %v", err)
 	}
 	if err := store.Remove("x", ActiveIdentity{Known: true}); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("read-only Remove returned %v", err)
@@ -374,6 +455,44 @@ func TestStoreRejectsSymlinksAndWrongSchema(t *testing.T) {
 	}
 	if _, err := store.List(); !errors.Is(err, ErrInvalidSchema) {
 		t.Fatalf("got %v, want schema rejection", err)
+	}
+}
+
+func TestListPartialReturnsHealthyAccountsAndSanitizedIssues(t *testing.T) {
+	store := mustOpen(t)
+	healthy, err := store.Save(mustParse(t, authFixture(t, "user", "workspace", "healthy@example.com", "healthy-secret", nil)), "healthy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	badID := "123e4567-e89b-42d3-a456-426614174000"
+	bad := `{"schema_version":999,"secret":"must-not-leak"}`
+	if err := os.WriteFile(store.accountPath(badID), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.root, "private-name.json"), []byte("must-not-leak"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listed, issues, err := store.ListPartial()
+	if err != nil || len(listed) != 1 || listed[0] != healthy || len(issues) != 2 {
+		t.Fatalf("listed=%#v issues=%#v err=%v", listed, issues, err)
+	}
+	if _, err := store.List(); err == nil {
+		t.Fatal("strict List accepted malformed inventory")
+	}
+	if found, err := store.Find(healthy.ID); err != nil || found != healthy {
+		t.Fatalf("exact healthy lookup failed: found=%#v err=%v", found, err)
+	}
+	encoded, err := json.Marshal(issues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{store.root, "private-name", "must-not-leak", "secret"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("issues exposed %q: %s", forbidden, encoded)
+		}
+	}
+	if issues[0].Code == "" || issues[0].Message == "" || issues[1].Code == "" || issues[1].Message == "" {
+		t.Fatalf("issues lack explicit classifications: %#v", issues)
 	}
 }
 

@@ -3,6 +3,7 @@ package quota
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,7 @@ type fakeClient struct {
 	refreshes, usages int
 	next              []byte
 	usageErr          error
+	use               func() (auth.Quota, error)
 }
 
 func (f *fakeClient) Refresh(context.Context, []byte) ([]byte, error) {
@@ -24,6 +26,9 @@ func (f *fakeClient) Refresh(context.Context, []byte) ([]byte, error) {
 }
 func (f *fakeClient) Usage(context.Context, []byte) (auth.Quota, error) {
 	f.usages++
+	if f.use != nil {
+		return f.use()
+	}
 	v := false
 	return auth.Quota{Exhausted: &v}, f.usageErr
 }
@@ -162,5 +167,35 @@ func TestSelectionGuardRunsAgainImmediatelyBeforeRotation(t *testing.T) {
 	_, err := s.Refresh(context.Background(), acc.ID, true)
 	if err != ErrSelectionChanged || f.refreshes != 0 {
 		t.Fatalf("%v %+v", err, f)
+	}
+}
+
+func TestCancellationFromFinalUsageIsNotCachedOrReportedAsSuccess(t *testing.T) {
+	s, f, acc := fixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.use = func() (auth.Quota, error) {
+		cancel()
+		return auth.Quota{}, context.Canceled
+	}
+	e, err := s.Refresh(ctx, acc.ID, true)
+	if !errors.Is(err, context.Canceled) || e.AttemptedAt.IsZero() {
+		t.Fatalf("entry=%+v err=%v", e, err)
+	}
+	if _, ok, cacheErr := s.Cached(acc.ID); cacheErr != nil || ok {
+		t.Fatalf("cancelled attempt was cached: ok=%v err=%v", ok, cacheErr)
+	}
+}
+
+func TestDeadlineFromUsageIsNotAnOrdinaryPartialFailure(t *testing.T) {
+	s, f, acc := fixture(t)
+	f.use = func() (auth.Quota, error) {
+		return auth.Quota{}, context.DeadlineExceeded
+	}
+	_, err := s.Refresh(context.Background(), acc.ID, true)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, ok, cacheErr := s.Cached(acc.ID); cacheErr != nil || ok {
+		t.Fatalf("deadline failure was cached: ok=%v err=%v", ok, cacheErr)
 	}
 }

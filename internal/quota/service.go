@@ -81,6 +81,9 @@ func (s Service) readCache() (map[string]Entry, error) {
 // Refresh reuses observations for one minute unless explicitly refreshed.
 // Failure retains stale data with a warning, never fabricating zero usage.
 func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return Entry{}, err
+	}
 	if s.CheckSelection != nil && s.CheckSelection() != nil {
 		return Entry{}, ErrSelectionChanged
 	}
@@ -95,6 +98,9 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 	previous := entries[account.ID]
 	age := s.now().Sub(previous.AttemptedAt)
 	if !force && !previous.AttemptedAt.IsZero() && age >= 0 && age < time.Minute {
+		if err := ctx.Err(); err != nil {
+			return previous, err
+		}
 		return previous, nil
 	}
 	e := previous
@@ -115,6 +121,10 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 		}
 	default:
 		q, err = s.inactive(ctx, account)
+	}
+	if cancelErr := cancellationError(ctx, err); cancelErr != nil {
+		e.Stale = e.Quota != nil
+		return e, cancelErr
 	}
 	if errors.Is(err, ErrSelectionChanged) {
 		return previous, err
@@ -140,6 +150,9 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 		}
 	}
 	entries[account.ID] = e
+	if err := ctx.Err(); err != nil {
+		return e, err
+	}
 	raw, marshalErr := json.Marshal(entries)
 	if marshalErr != nil {
 		return e, marshalErr
@@ -147,7 +160,22 @@ func (s Service) Refresh(ctx context.Context, id string, force bool) (Entry, err
 	if writeErr := operation.AtomicWrite(s.Root, "quota.json", raw); writeErr != nil {
 		return e, writeErr
 	}
+	if err := ctx.Err(); err != nil {
+		// The cache write completed atomically. Report cancellation while returning
+		// the exact entry that was committed rather than denying that effect.
+		return e, err
+	}
 	return e, nil // per-account network failures are displayed, not a failed list.
+}
+
+func cancellationError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return nil
 }
 
 func (s Service) inactive(ctx context.Context, account accounts.Account) (auth.Quota, error) {
@@ -186,11 +214,19 @@ func (s Service) refresh(ctx context.Context, account accounts.Account, raw []by
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	parsed, err := accounts.ParseNativeAuth(next)
 	if err != nil {
 		return nil, err
 	}
 	if _, err = s.Store.UpdateCredentials(account.ID, parsed); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		// Credential replacement already completed. Do not roll it back or turn
+		// cancellation into an ordinary quota warning.
 		return nil, err
 	}
 	return next, nil

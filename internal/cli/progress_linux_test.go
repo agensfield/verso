@@ -117,9 +117,45 @@ func TestProgressPTYAnimatesWithinWidthAndClears(t *testing.T) {
 		if frame == "" {
 			continue
 		}
-		if len([]rune(frame)) > 20 {
+		if len([]rune(frame)) > 19 {
 			t.Fatalf("frame exceeds terminal width: %q", frame)
 		}
+	}
+}
+
+func TestProgressPTYAdaptsToNarrowerTerminal(t *testing.T) {
+	pty := newPTYCapture(t, 80)
+	a := &App{Err: pty.slave, Env: []string{"TERM=xterm", "NO_COLOR=1"}}
+	a.progress("Checking an intentionally long operation that fits the original terminal")
+	waitForPTY(t, pty, "/ Checking")
+	beforeResize := len(pty.output())
+	if err := unix.IoctlSetWinsize(int(pty.slave.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: 24, Col: 20}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resized := pty.output()[beforeResize:]
+		if strings.Count(resized, "\r\x1b[2K") >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	a.clearProgress()
+
+	resized := pty.output()[beforeResize:]
+	frames := strings.Split(resized, "\r\x1b[2K")[1:]
+	checked := 0
+	for _, frame := range frames {
+		if frame == "" {
+			continue
+		}
+		checked++
+		if len([]rune(frame)) > 19 {
+			t.Fatalf("resized frame can wrap at column 20: %q", frame)
+		}
+	}
+	if checked < 2 || !strings.Contains(resized, "…") {
+		t.Fatalf("spinner did not render truncated post-resize frames: %q", resized)
 	}
 }
 

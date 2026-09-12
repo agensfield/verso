@@ -138,14 +138,21 @@ func (d *progressDisplay) run() {
 func (d *progressDisplay) render(frame int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	width := terminalWidth(d.out.Fd())
+	if width <= 0 || width > 500 {
+		width = d.width
+	}
+	if width > 1 {
+		width--
+	}
 	frames := "|/-\\"
 	mark := string(frames[frame%len(frames)])
 	message := ""
-	if d.width > 2 {
-		message = fitProgressMessage(d.message, d.width-2)
+	if width > 2 {
+		message = fitProgressMessage(d.message, width-2)
 	}
 	plain := mark
-	if message != "" && d.width > 1 {
+	if message != "" && width > 1 {
 		plain += " " + message
 	}
 	if d.color {

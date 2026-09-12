@@ -56,7 +56,7 @@ func (f *fake) Start(context.Context) error                      { return f.even
 func (f *fake) Verify(_ context.Context, s string, _ bool) error { return f.event("verify:" + s) }
 func consent(Plan) error                                         { return nil }
 func run(f *fake) (Result, error) {
-	return (Engine{f}).Execute(context.Background(), Request{Target: "B"}, consent)
+	return (Engine{Backend: f}).Execute(context.Background(), Request{Target: "B"}, consent)
 }
 func has(f *fake, event string) bool {
 	for _, s := range f.events {
@@ -74,7 +74,7 @@ func TestCentralSwitchOrdersOutgoingSaveAfterStop(t *testing.T) {
 	if err != nil || out.Active != "B" || !out.Changed || out.RollbackAttempted {
 		t.Fatalf("result=%+v err=%v", out, err)
 	}
-	want := []string{"lock", "unfinished", "inspect", "prepare", "inspect", "inspect", "snapshot", "journal:prepared", "journal:stopping", "stop", "save:A", "journal:activating", "activate:B", "journal:starting", "start", "verify:B", "journal:committed", "clear", "unlock"}
+	want := []string{"lock", "unfinished", "inspect", "prepare", "unfinished", "inspect", "unfinished", "inspect", "snapshot", "journal:prepared", "journal:stopping", "stop", "save:A", "journal:activating", "activate:B", "journal:starting", "start", "verify:B", "journal:committed", "clear", "unlock"}
 	if !reflect.DeepEqual(f.events, want) {
 		t.Fatalf("events=%v", f.events)
 	}
@@ -134,7 +134,7 @@ func TestUnknownQuotaWarnsWhileExhaustedNeedsOverride(t *testing.T) {
 	}
 	f = fixture()
 	f.states[0].Exhausted = true
-	_, err := (Engine{f}).Execute(context.Background(), Request{Target: "B", AllowExhausted: true}, consent)
+	_, err := (Engine{Backend: f}).Execute(context.Background(), Request{Target: "B", AllowExhausted: true}, consent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,12 +157,12 @@ func TestPrepareAndConsentFailuresLeaveOldRuntimeRunning(t *testing.T) {
 		t.Fatalf("err=%v events=%v", err, f.events)
 	}
 	f = fixture()
-	_, err := (Engine{f}).Execute(context.Background(), Request{Target: "B"}, func(Plan) error { return errors.New("declined") })
+	_, err := (Engine{Backend: f}).Execute(context.Background(), Request{Target: "B"}, func(Plan) error { return errors.New("declined") })
 	if err == nil || has(f, "stop") || f.cp != nil {
 		t.Fatalf("err=%v events=%v", err, f.events)
 	}
 	f = fixture()
-	_, err = (Engine{f}).Execute(context.Background(), Request{Target: "B"}, nil)
+	_, err = (Engine{Backend: f}).Execute(context.Background(), Request{Target: "B"}, nil)
 	if !errors.Is(err, ErrHuman) || len(f.events) != 0 {
 		t.Fatalf("err=%v events=%v", err, f.events)
 	}
@@ -195,7 +195,7 @@ func TestSnapshotFailureRequiresIndependentOverride(t *testing.T) {
 		t.Fatalf("err=%v events=%v", err, f.events)
 	}
 	f.events = nil
-	out, err := (Engine{f}).Execute(context.Background(), Request{Target: "B", AllowNoSnapshot: true}, consent)
+	out, err := (Engine{Backend: f}).Execute(context.Background(), Request{Target: "B", AllowNoSnapshot: true}, consent)
 	if err != nil || !out.Changed || len(out.Warnings) != 1 {
 		t.Fatalf("out=%+v err=%v", out, err)
 	}
@@ -246,8 +246,77 @@ func TestCommittedJournalFailureDoesNotUndoSuccessfulAccount(t *testing.T) {
 
 func TestPreviewIsReadOnly(t *testing.T) {
 	f := fixture()
-	p, err := (Engine{f}).Preview(context.Background(), Request{Target: "B"})
-	if err != nil || p.Target != "B" || !reflect.DeepEqual(f.events, []string{"inspect"}) {
+	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
+	if err != nil || p.Target != "B" || !reflect.DeepEqual(f.events, []string{"unfinished", "inspect"}) {
 		t.Fatalf("p=%+v err=%v events=%v", p, err, f.events)
+	}
+}
+
+func TestPreviewReportsUnfinishedJournalWithObservedState(t *testing.T) {
+	f := fixture()
+	f.unfinished = true
+	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
+	if !errors.Is(err, ErrUnfinished) || !p.Unfinished || !p.UnfinishedKnown || p.Target != "B" || p.Active != "A" || !p.ActiveKnown {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+}
+
+func TestUnfinishedJournalWinsOverInspectionFailure(t *testing.T) {
+	f := fixture()
+	f.unfinished = true
+	f.fail["inspect"] = ErrExhausted
+	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
+	if !errors.Is(err, ErrUnfinished) || !p.Unfinished || !p.UnfinishedKnown || p.Active != "A" {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+	if _, err := run(f); !errors.Is(err, ErrUnfinished) || has(f, "prepare") {
+		t.Fatalf("execute err=%v events=%v", err, f.events)
+	}
+}
+
+func TestPreviewDistinguishesFailedJournalInspection(t *testing.T) {
+	f := fixture()
+	f.fail["unfinished"] = errors.New("journal unreadable")
+	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
+	if err == nil || p.Unfinished || p.UnfinishedKnown || p.Target != "B" || p.Active != "A" {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+}
+
+func TestPreviewRetainsPartialInspectionOnError(t *testing.T) {
+	f := fixture()
+	f.fail["inspect"] = errors.New("inspection incomplete")
+	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
+	if err == nil || p.Target != "B" || p.Active != "A" || !p.ActiveKnown || p.Daemon != Running {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+}
+
+func TestExecuteReportsActualProgressPhases(t *testing.T) {
+	f := fixture()
+	f.states[0].Herdr = true
+	var phases []string
+	_, err := (Engine{Backend: f, OnProgress: func(phase string) {
+		phases = append(phases, phase)
+	}}).Execute(context.Background(), Request{Target: "B"}, consent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"preparing", "stopping", "saving", "activating", "starting", "verifying", "committed"}
+	if !reflect.DeepEqual(phases, want) {
+		t.Fatalf("phases=%v want=%v", phases, want)
+	}
+}
+
+func TestRollbackReportsProgress(t *testing.T) {
+	f := fixture()
+	f.fail["verify:B"] = errors.New("wrong account")
+	var phases []string
+	_, _ = (Engine{Backend: f, OnProgress: func(phase string) {
+		phases = append(phases, phase)
+	}}).Execute(context.Background(), Request{Target: "B"}, consent)
+	want := []string{"preparing", "stopping", "saving", "activating", "starting", "verifying", "rolling_back"}
+	if !reflect.DeepEqual(phases, want) {
+		t.Fatalf("phases=%v want=%v", phases, want)
 	}
 }

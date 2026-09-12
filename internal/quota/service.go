@@ -214,9 +214,6 @@ func (s Service) refresh(ctx context.Context, account accounts.Account, raw []by
 	if err != nil {
 		return nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	parsed, err := accounts.ParseNativeAuth(next)
 	if err != nil {
 		return nil, err

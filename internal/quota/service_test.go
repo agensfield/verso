@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -17,11 +18,15 @@ type fakeClient struct {
 	refreshes, usages int
 	next              []byte
 	usageErr          error
+	refresh           func() ([]byte, error)
 	use               func() (auth.Quota, error)
 }
 
 func (f *fakeClient) Refresh(context.Context, []byte) ([]byte, error) {
 	f.refreshes++
+	if f.refresh != nil {
+		return f.refresh()
+	}
 	return f.next, nil
 }
 func (f *fakeClient) Usage(context.Context, []byte) (auth.Quota, error) {
@@ -197,5 +202,26 @@ func TestDeadlineFromUsageIsNotAnOrdinaryPartialFailure(t *testing.T) {
 	}
 	if _, ok, cacheErr := s.Cached(acc.ID); cacheErr != nil || ok {
 		t.Fatalf("deadline failure was cached: ok=%v err=%v", ok, cacheErr)
+	}
+}
+
+func TestCancellationRacingSuccessfulRotationKeepsReturnedCredentials(t *testing.T) {
+	s, f, acc := fixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	rotated := bytes.ReplaceAll(credentials(9999999999, "u", "a"), []byte("synthetic-only"), []byte("synthetic-rotated"))
+	f.refresh = func() ([]byte, error) {
+		cancel()
+		return rotated, nil
+	}
+	_, err := s.Refresh(ctx, acc.ID, true)
+	if !errors.Is(err, context.Canceled) || f.usages != 0 {
+		t.Fatalf("err=%v client=%+v", err, f)
+	}
+	raw, readErr := s.Store.Credentials(acc.ID)
+	if readErr != nil || !bytes.Contains(raw, []byte("synthetic-rotated")) {
+		t.Fatalf("successful rotation was not retained: err=%v", readErr)
+	}
+	if _, ok, cacheErr := s.Cached(acc.ID); cacheErr != nil || ok {
+		t.Fatalf("cancelled quota attempt was cached: ok=%v err=%v", ok, cacheErr)
 	}
 }

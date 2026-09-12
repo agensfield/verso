@@ -32,6 +32,21 @@ type ProcessRecord struct {
 	PID       int    `json:"pid"`
 	StartTime string `json:"processStartTime"`
 }
+
+type ClientKind string
+
+const (
+	ClientAttached   ClientKind = "attached"
+	ClientStandalone ClientKind = "standalone"
+	ClientUnknown    ClientKind = "unknown"
+)
+
+type Client struct {
+	PID   int        `json:"pid"`
+	Kind  ClientKind `json:"kind"`
+	Basis string     `json:"basis"`
+}
+
 type CredentialProof struct {
 	Status        string                  `json:"status"`
 	Basis         string                  `json:"basis,omitempty"`
@@ -96,6 +111,9 @@ type Observation struct {
 	Email          string                  `json:"-"` // compatibility alias for SelectedEmail
 	Credential     CredentialProof         `json:"credentialProof"`
 	Busy           []string                `json:"busy,omitempty"`
+	ActivityKnown  bool                    `json:"activityKnown"`
+	ActivityError  string                  `json:"activityError,omitempty"`
+	Clients        []Client                `json:"clients"`
 	Warnings       []string                `json:"warnings,omitempty"`
 	Record         *ProcessRecord          `json:"-"`
 	authSnapshot   string
@@ -209,7 +227,12 @@ func (i Inspector) InspectSelection(ctx context.Context) (Observation, error) {
 func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	o := Observation{Daemon: switcher.Unknown, Home: i.Home}
+	o := Observation{
+		Daemon:        switcher.Unknown,
+		Home:          i.Home,
+		ActivityError: "not inspected",
+		Clients:       make([]Client, 0),
+	}
 	if !filepath.IsAbs(i.Home) {
 		return o, errors.New("Codex home must be absolute")
 	}
@@ -235,7 +258,17 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 		return o, err
 	}
 	servers := 0
+	var publicServers []Process
 	managedOverride := ""
+	clientCounts := make(map[ClientKind]int)
+	clientsSeen := 0
+	addClient := func(client Client) {
+		clientsSeen++
+		clientCounts[client.Kind]++
+		if len(o.Clients) < maxClientInventory {
+			o.Clients = append(o.Clients, client)
+		}
+	}
 	for _, p := range processes {
 		fields := strings.Fields(p.Command)
 		if len(fields) == 0 || !i.isCodex(fields[0]) {
@@ -246,18 +279,18 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 				continue
 			}
 			if privateServer(fields[2:]) {
-				o.Warnings = append(o.Warnings, fmt.Sprintf("private Codex app-server %d must be restarted after switching", p.PID))
+				addClient(Client{PID: p.PID, Kind: ClientStandalone, Basis: "private-app-server-process"})
 			} else {
 				servers++
+				publicServers = append(publicServers, p)
 				if managedOverride == "" {
 					managedOverride = commandConfigOverride(fields[2:])
 				}
 			}
 			continue
 		}
-		if !explicitRemote(fields, i.Socket()) {
-			o.Warnings = append(o.Warnings, fmt.Sprintf("Codex process %d may be standalone; reopen it after switching", p.PID))
-		}
+		kind, basis := classifyClientIntent(fields, i.Socket())
+		addClient(Client{PID: p.PID, Kind: kind, Basis: basis})
 	}
 	_, socketErr := os.Lstat(i.Socket())
 	if socketErr != nil && !errors.Is(socketErr, os.ErrNotExist) {
@@ -266,6 +299,15 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 	record, err := i.readRecord()
 	if err != nil {
 		return o, err
+	}
+	for _, server := range publicServers {
+		if record == nil || server.PID != record.PID {
+			addClient(Client{PID: server.PID, Kind: ClientStandalone, Basis: "independent-app-server-process"})
+		}
+	}
+	o.Warnings = append(o.Warnings, clientWarnings(clientCounts)...)
+	if clientsSeen > len(o.Clients) {
+		o.Warnings = append(o.Warnings, fmt.Sprintf("Codex client inventory is limited to %d entries", maxClientInventory))
 	}
 	alive := false
 	if record != nil {
@@ -291,6 +333,10 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 			return o, errors.New("socket or unmanaged app-server exists without a verified managed process")
 		}
 		o.Daemon = switcher.Stopped
+		if activity {
+			o.ActivityKnown = true
+			o.ActivityError = ""
+		}
 		if i.Resolver == nil {
 			o.Credential = unknownCredential("stopped runtime has no complete config resolver")
 		} else if strings.TrimSpace(i.CWD) == "" || !filepath.IsAbs(i.CWD) {
@@ -346,6 +392,9 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 	if err != nil || home != serverHome {
 		return o, errors.New("daemon reports a different Codex home")
 	}
+	// Runtime identity is established independently of thread activity. Keep
+	// this evidence when the bounded activity inventory is unavailable.
+	o.Daemon, o.Record, o.Version = switcher.Running, record, rpc.Info.UserAgent
 	cwd, cwdErr := i.processCWD(ctx, record.PID)
 	if cwdErr != nil || !filepath.IsAbs(cwd) {
 		o.Credential = unknownCredential("managed process startup cwd is unavailable")
@@ -359,15 +408,28 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 	if activity {
 		busy, err = loadedBusy(ctx, rpc)
 		if err != nil {
+			o.ActivityError = "loaded thread activity is unavailable"
 			return o, err
 		}
+		o.ActivityKnown = true
+		o.ActivityError = ""
 	}
-	if servers > 1 {
-		o.Warnings = append(o.Warnings, "additional app-server endpoints may retain previous credentials; restart them after switching")
-	}
-	o.Daemon, o.Record, o.Busy, o.Version = switcher.Running, record, busy, rpc.Info.UserAgent
+	o.Busy = busy
 	o.Warnings = append(o.Warnings, "background activity is not completely observable; native shutdown may interrupt it")
 	return o, nil
+}
+
+const maxClientInventory = 128
+
+func clientWarnings(counts map[ClientKind]int) []string {
+	var warnings []string
+	if counts[ClientStandalone] > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d standalone Codex runtime(s) may retain previous credentials; reopen them after switching", counts[ClientStandalone]))
+	}
+	if counts[ClientUnknown] > 0 {
+		warnings = append(warnings, fmt.Sprintf("attachment could not be verified for %d Codex client(s); some may need reopening after switching", counts[ClientUnknown]))
+	}
+	return warnings
 }
 
 func unknownCredential(reason string) CredentialProof {
@@ -552,16 +614,39 @@ func (i Inspector) processes(ctx context.Context) ([]Process, error) {
 	return out, nil
 }
 func normalSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
-func explicitRemote(args []string, socket string) bool {
-	for n, arg := range args {
-		if arg == "--remote" && n+1 < len(args) && args[n+1] == "unix://"+socket {
-			return true
+func classifyClientIntent(args []string, socket string) (ClientKind, string) {
+	remote, explicit := remoteIntent(args)
+	if !explicit {
+		return ClientUnknown, "implicit-auto-connect-or-embedded"
+	}
+	if remote == "unix://"+socket {
+		// This proves launch intent for the selected endpoint, not a live peer
+		// relationship. Basis keeps that boundary machine-readable.
+		return ClientAttached, "explicit-managed-remote-intent"
+	}
+	if remote == "unix://" {
+		return ClientUnknown, "explicit-default-remote-intent"
+	}
+	return ClientUnknown, "explicit-other-remote-intent"
+}
+
+func remoteIntent(args []string) (string, bool) {
+	for n := 1; n < len(args); n++ {
+		arg := args[n]
+		if arg == "--" {
+			break
 		}
-		if arg == "--remote=unix://"+socket {
-			return true
+		if arg == "--remote" {
+			if n+1 < len(args) && args[n+1] != "--" {
+				return args[n+1], true
+			}
+			return "", true
+		}
+		if value, ok := strings.CutPrefix(arg, "--remote="); ok {
+			return value, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func loadedBusy(ctx context.Context, rpc *RPC) ([]string, error) {

@@ -461,7 +461,7 @@ func TestRemoteTextRemainsUnverifiedInObservation(t *testing.T) {
 		command string
 		fails   bool
 	}{
-		{"/bin/codex --remote unix://SOCKET resume synthetic-thread", true},
+		{"/bin/codex --remote unix://SOCKET resume synthetic-thread", false},
 		{"/bin/codex explain --remote=unix://SOCKET safely", false},
 	} {
 		home := t.TempDir()
@@ -497,7 +497,26 @@ func TestGlobalOptionsDoNotHideAppServer(t *testing.T) {
 	}
 }
 
-func TestUncertainProcessRoleRemainsInRunningInventory(t *testing.T) {
+func TestOrdinaryRootValueOptionRemainsAdvisory(t *testing.T) {
+	for _, command := range []string{
+		"/bin/codex -m synthetic-model resume synthetic-thread",
+		"/bin/codex -c model=synthetic resume synthetic-thread",
+		`/bin/codex -c model="hello world" resume synthetic-thread`,
+		"/bin/codex --image /tmp/synthetic.png resume synthetic-thread",
+	} {
+		home := t.TempDir()
+		testNativeAuth(t, home)
+		i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("1234 " + command + "\n"), nil
+		}}
+		o, err := i.Inspect(context.Background())
+		if err != nil || o.Daemon != switcher.Stopped || !o.ActivityKnown || len(o.Clients) != 1 || o.Clients[0].Kind != ClientUnknown {
+			t.Fatalf("command=%q observation=%+v err=%v", command, o, err)
+		}
+	}
+}
+
+func TestAmbiguousOptionProcessRemainsInRunningInventory(t *testing.T) {
 	i, _ := managedFixture(t, "idle")
 	run := i.Run
 	i.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -512,7 +531,7 @@ func TestUncertainProcessRoleRemainsInRunningInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, client := range o.Clients {
-		if client.PID == 987654 && client.Kind == ClientUnknown && client.Basis == "command-role-unverified" {
+		if client.PID == 987654 && client.Kind == ClientUnknown && client.Basis == "command-metadata-unverified" {
 			return
 		}
 	}

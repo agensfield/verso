@@ -663,10 +663,10 @@ func classifyProcessRole(fields []string) (processRole, []string) {
 			return processCandidate, nil
 		}
 		if rootOptionsWithValue[arg] {
-			return processUncertain, nil
+			return ambiguousOptionRole(fields[n+1:]), nil
 		}
 		if arg == "-i" || arg == "--image" {
-			return processUncertain, nil
+			return ambiguousOptionRole(fields[n+1:]), nil
 		}
 		if arg == "-h" || arg == "--help" || arg == "-V" || arg == "--version" {
 			return processIgnored, nil
@@ -677,11 +677,11 @@ func classifyProcessRole(fields []string) (processRole, []string) {
 		if strings.Contains(arg, "=") {
 			key, _, _ := strings.Cut(arg, "=")
 			if rootOptionsWithValue[key] {
-				return processUncertain, nil
+				return ambiguousOptionRole(fields[n+1:]), nil
 			}
 		}
 		if strings.HasPrefix(arg, "-") {
-			return processUncertain, nil
+			return ambiguousOptionRole(fields[n+1:]), nil
 		}
 		switch arg {
 		case "app-server":
@@ -695,6 +695,15 @@ func classifyProcessRole(fields []string) (processRole, []string) {
 		}
 	}
 	return processCandidate, nil
+}
+
+func ambiguousOptionRole(remaining []string) processRole {
+	for _, field := range remaining {
+		if field == "app-server" {
+			return processUncertain
+		}
+	}
+	return processCandidate
 }
 
 func loadedBusy(ctx context.Context, rpc *RPC) ([]string, error) {

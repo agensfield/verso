@@ -4,7 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/agensfield/verso/internal/switcher"
 )
@@ -91,6 +94,32 @@ func TestMalformedJournalIsNotCleared(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r, "switch.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestJournalReadRejectsFIFOWithoutBlocking(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Verso alpha targets macOS and Linux")
+	}
+	r := t.TempDir()
+	if err := os.Chmod(r, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(r, "switch.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Journal{r}).Read()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "invalid or unprotected switch journal" {
+			t.Fatalf("unexpected FIFO error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Journal.Read blocked opening a FIFO")
 	}
 }
 func TestRejectPublicRootAndSymlinkLock(t *testing.T) {

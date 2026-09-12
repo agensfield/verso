@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/agensfield/verso/internal/accounts"
@@ -41,22 +42,24 @@ type App struct {
 }
 
 type response struct {
-	Active   string                 `json:"active_account_id,omitempty"`
-	Cached   bool                   `json:"cached,omitempty"`
-	Update   *updater.Result        `json:"update,omitempty"`
-	Plan     *switcher.Plan         `json:"plan,omitempty"`
-	Quotas   map[string]quota.Entry `json:"quotas,omitempty"`
-	Switch   *switcher.Result       `json:"switch_result,omitempty"`
-	Journal  *switcher.Checkpoint   `json:"unfinished_switch,omitempty"`
-	Snapshot *herdr.Snapshot        `json:"herdr_snapshot,omitempty"`
-	Schema   string                 `json:"schema"`
-	OK       bool                   `json:"ok"`
-	Command  string                 `json:"command"`
-	Message  string                 `json:"message,omitempty"`
-	Error    string                 `json:"error,omitempty"`
-	Accounts []accounts.Account     `json:"accounts,omitempty"`
-	Runtime  *codex.Observation     `json:"runtime,omitempty"`
-	Target   *accounts.Account      `json:"target,omitempty"`
+	Active    string                 `json:"active_account_id,omitempty"`
+	Cached    bool                   `json:"cached,omitempty"`
+	Update    *updater.Result        `json:"update,omitempty"`
+	Plan      *switcher.Plan         `json:"plan,omitempty"`
+	Quotas    map[string]quota.Entry `json:"quotas,omitempty"`
+	Switch    *switcher.Result       `json:"switch_result,omitempty"`
+	Journal   *switcher.Checkpoint   `json:"unfinished_switch,omitempty"`
+	Snapshot  *herdr.Snapshot        `json:"herdr_snapshot,omitempty"`
+	Schema    string                 `json:"schema"`
+	OK        bool                   `json:"ok"`
+	Command   string                 `json:"command"`
+	Message   string                 `json:"message,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	ErrorCode string                 `json:"error_code,omitempty"`
+	Hint      string                 `json:"hint,omitempty"`
+	Accounts  []accounts.Account     `json:"accounts,omitempty"`
+	Runtime   *codex.Observation     `json:"runtime,omitempty"`
+	Target    *accounts.Account      `json:"target,omitempty"`
 }
 
 const usage = `Verso: switch Codex accounts
@@ -97,6 +100,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	checkUpdate := fs.Bool("check", false, "")
 	allowExhausted := fs.Bool("allow-exhausted", false, "")
 	allowNoSnapshot := fs.Bool("allow-no-snapshot", false, "")
+	intent := scanInvocation(args)
+	a.json = intent.json
 	ordered, err := flagsFirst(fs, args)
 	if err == nil {
 		err = fs.Parse(ordered)
@@ -121,11 +126,16 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 	pos := fs.Args()
 	if len(pos) == 0 {
-		_, _ = fmt.Fprint(a.Out, usage)
-		return 0
+		if a.json {
+			return a.finish(response{Command: "help", Message: usage}, nil)
+		}
+		return writeExit(a.Out, usage)
 	}
 	command := pos[0]
 	pos = pos[1:]
+	if err := validateCommandFlags(command, intent.flags); err != nil {
+		return a.finish(response{Command: command}, err)
+	}
 	if command == "help" {
 		if len(pos) > 1 {
 			return a.finish(response{Command: "help"}, errors.New("usage: verso help [command|options]"))
@@ -235,6 +245,7 @@ func (a *App) finish(r response, err error) int {
 	r.OK = err == nil
 	if err != nil {
 		r.Error = err.Error()
+		r.ErrorCode, r.Hint = classifyError(r.Command, err)
 	}
 	if a.json {
 		e := json.NewEncoder(a.Out)
@@ -243,8 +254,16 @@ func (a *App) finish(r response, err error) int {
 			return 1
 		}
 	} else {
+		failedWrite := false
+		writef := func(w io.Writer, format string, args ...any) {
+			if failedWrite {
+				return
+			}
+			_, writeErr := fmt.Fprintf(w, format, args...)
+			failedWrite = writeErr != nil
+		}
 		if r.Message != "" {
-			_, _ = fmt.Fprintln(a.Out, r.Message)
+			writef(a.Out, "%s\n", r.Message)
 		}
 		if r.Command == "list" && len(r.Accounts) > 0 {
 			if renderErr := a.renderAccounts(r); renderErr != nil {
@@ -253,44 +272,149 @@ func (a *App) finish(r response, err error) int {
 			}
 		}
 		if r.Journal != nil {
-			_, _ = fmt.Fprintf(a.Out, "Phase: %s\nPrevious: %q\nRequested: %q\n", r.Journal.Phase, r.Journal.From, r.Journal.Target)
+			writef(a.Out, "Phase: %s\nPrevious: %q\nRequested: %q\n", r.Journal.Phase, r.Journal.From, r.Journal.Target)
 		}
 		if r.Switch != nil && r.Switch.RollbackAttempted {
 			if r.Switch.RollbackSucceeded {
-				_, _ = fmt.Fprintln(a.Out, "Rollback: previous account restored and verified.")
+				writef(a.Out, "Rollback: previous account restored and verified.\n")
 			} else {
-				_, _ = fmt.Fprintln(a.Out, "Rollback: incomplete; inspect verso recovery before further changes.")
+				writef(a.Out, "Rollback: incomplete; inspect verso recovery before further changes.\n")
+			}
+		}
+		if r.Switch != nil {
+			for _, warning := range r.Switch.Warnings {
+				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
 			}
 		}
 		if r.Plan != nil {
-			_, _ = fmt.Fprintf(a.Out, "%s %s\n", a.humanHeading("Codex:"), r.Plan.Daemon)
+			writef(a.Out, "%s %s\n", a.humanHeading("Codex:"), r.Plan.Daemon)
 			if len(r.Plan.Busy) > 0 {
-				_, _ = fmt.Fprintf(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Plan.Busy))
+				writef(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Plan.Busy))
 			}
 			for _, warning := range r.Plan.Warnings {
-				_, _ = fmt.Fprintln(a.Out, a.humanHeading("Warning:"), warning)
+				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
 			}
 		}
 		if r.Runtime != nil {
-			_, _ = fmt.Fprintf(a.Out, "%s %s\n%s %s\n%s %s\n", a.humanHeading("Codex:"), r.Runtime.Daemon, a.humanHeading("Credentials:"), r.Runtime.Config.CredentialStore, a.humanHeading("Account:"), selectedAccountName(r))
+			writef(a.Out, "%s %s\n%s %s\n%s %s\n", a.humanHeading("Codex:"), r.Runtime.Daemon, a.humanHeading("Credentials:"), r.Runtime.Config.CredentialStore, a.humanHeading("Selected login:"), selectedAccountName(r))
+			writef(a.Out, "%s %s\n", a.humanHeading("Credential proof:"), credentialProofLabel(r.Runtime.Credential))
+			if r.Runtime.Credential.Reason != "" {
+				writef(a.Out, "%s %s\n", a.humanHeading("Credential detail:"), r.Runtime.Credential.Reason)
+			}
+			if r.Runtime.Credential.Warning != "" {
+				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), r.Runtime.Credential.Warning)
+			}
 			if len(r.Runtime.Busy) > 0 {
-				_, _ = fmt.Fprintf(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Runtime.Busy))
+				writef(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Runtime.Busy))
 			}
 			for _, warning := range r.Runtime.Warnings {
-				_, _ = fmt.Fprintf(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
+				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
 			}
 		}
 		if r.Target != nil {
-			_, _ = fmt.Fprintf(a.Out, "%s %s\n", a.humanHeading("Account:"), accountChoiceName(*r.Target))
+			writef(a.Out, "%s %s\n", a.humanHeading("Account:"), accountChoiceName(*r.Target))
 		}
 		if err != nil {
-			_, _ = fmt.Fprintln(a.Err, "verso:", r.Error)
+			writef(a.Err, "verso: %s\n", r.Error)
+			if r.Hint != "" {
+				writef(a.Err, "hint: %s\n", r.Hint)
+			}
+		}
+		if failedWrite {
+			return 1
 		}
 	}
 	if err != nil {
 		return 1
 	}
 	return 0
+}
+
+type invocationIntent struct {
+	json  bool
+	flags map[string]bool
+}
+
+func scanInvocation(args []string) invocationIntent {
+	result := invocationIntent{flags: make(map[string]bool)}
+	valueFlags := map[string]bool{"state-dir": true, "codex-home": true, "codex-bin": true}
+	for n := 0; n < len(args); n++ {
+		arg := args[n]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			continue
+		}
+		name, value, assigned := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if name == "h" {
+			name = "help"
+		}
+		result.flags[name] = true
+		if name == "json" {
+			result.json = !assigned
+			if assigned {
+				parsed, parseErr := strconv.ParseBool(value)
+				result.json = parseErr == nil && parsed
+			}
+		}
+		if valueFlags[name] && !assigned {
+			n++
+		}
+	}
+	return result
+}
+
+func validateCommandFlags(command string, seen map[string]bool) error {
+	global := map[string]bool{"json": true, "state-dir": true, "codex-home": true, "codex-bin": true, "help": true}
+	allowed := map[string]map[string]bool{
+		"list": {"cached": true}, "switch": {"allow-exhausted": true, "allow-no-snapshot": true},
+		"preview": {"allow-exhausted": true, "allow-no-snapshot": true}, "update": {"check": true},
+	}
+	for name := range seen {
+		if global[name] || allowed[command][name] {
+			continue
+		}
+		return fmt.Errorf("flag --%s is not valid for %s", name, command)
+	}
+	return nil
+}
+
+func classifyError(command string, err error) (string, string) {
+	message := err.Error()
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "cancelled", "retry when ready"
+	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for"):
+		return "invalid_arguments", "run verso help " + command
+	case strings.Contains(message, "not found"):
+		return "account_not_found", "run verso list --cached"
+	case strings.Contains(message, "ambiguous"):
+		return "account_ambiguous", "use an alias or ID from verso list --cached --json"
+	case strings.Contains(message, "unfinished") || strings.Contains(message, "recovery"):
+		return "recovery_required", "run verso recovery --json"
+	case strings.Contains(message, "unknown command"):
+		if command == "quota" {
+			return "unknown_command", "use verso list"
+		}
+		return "unknown_command", "run verso --help"
+	default:
+		return "operation_failed", ""
+	}
+}
+
+func writeExit(out io.Writer, value string) int {
+	if _, err := io.WriteString(out, value); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func credentialProofLabel(proof codex.CredentialProof) string {
+	if proof.Status == "" {
+		return "unknown"
+	}
+	return string(proof.Status)
 }
 
 // flagsFirst permits familiar `verso list --json` without a custom flag parser.

@@ -31,6 +31,9 @@ func (a *App) printHelp(topic string) int {
 			return a.finish(response{Command: "help"}, errors.New("unknown help topic; use verso --help"))
 		}
 	}
+	if a.json {
+		return a.finish(response{Command: "help", Message: text}, nil)
+	}
 	if a.accountColor() {
 		if first, rest, found := strings.Cut(text, "\n"); found {
 			text = a.humanHeading(first) + "\n" + rest

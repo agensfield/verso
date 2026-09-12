@@ -558,7 +558,7 @@ func classifyError(command string, err error) (string, string) {
 		return "inspection_unavailable", "run verso status --json"
 	case errors.Is(err, switcher.ErrBusy), errors.Is(err, switcher.ErrBackend), errors.Is(err, switcher.ErrChanged), errors.Is(err, switcher.ErrExhausted):
 		return "safety_refusal", "review verso preview --json before retrying"
-	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for") || strings.Contains(message, "unexpected or missing") || strings.Contains(message, "command-only flag"):
+	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for") || strings.Contains(message, "unexpected or missing") || strings.Contains(message, "command-only flag") || strings.HasPrefix(message, "use --") || strings.HasPrefix(message, "use verso --"):
 		if _, ok := commandHelp[command]; ok && command != "options" {
 			return "invalid_arguments", "run verso help " + command
 		}

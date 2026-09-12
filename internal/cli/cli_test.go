@@ -245,6 +245,19 @@ func TestUnknownCommandDiagnosticsDoNotEchoTerminalControls(t *testing.T) {
 	}
 }
 
+func TestShortcutFlagErrorsAreInvalidArguments(t *testing.T) {
+	for _, args := range [][]string{{"--skill", "--check=false", "--json"}, {"--version", "--cached=false", "--json"}} {
+		a, out, _ := appFixture(t)
+		if code := a.Run(context.Background(), args); code == 0 {
+			t.Fatalf("accepted %v", args)
+		}
+		var result response
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil || result.ErrorCode != "invalid_arguments" {
+			t.Fatalf("%v: %s", args, out.String())
+		}
+	}
+}
+
 func TestOfflineSchemaAndTypedVersionMetadata(t *testing.T) {
 	for _, args := range [][]string{{"schema", "--json"}, {"version", "--json"}, {"--version", "--json"}, {"--skill", "--json"}} {
 		a, out, _ := appFixture(t)

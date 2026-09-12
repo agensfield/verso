@@ -26,6 +26,9 @@ func (a *App) add(ctx context.Context, args []string) int {
 	if len(args) == 1 {
 		alias = args[0]
 	}
+	if err := accounts.ValidateAlias(alias); err != nil {
+		return a.finish(r, err)
+	}
 	// Acquire before authorizing: another Verso mutation must not begin while
 	// the human completes enrollment. Codex's own state is never touched here.
 	release, err := operation.Lock(a.StateDir)

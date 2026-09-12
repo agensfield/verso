@@ -88,3 +88,43 @@ func TestJSONEnrollmentDoesNotStartDeviceFlow(t *testing.T) {
 		t.Fatal("created state")
 	}
 }
+
+func TestEnrollmentValidatesAliasBeforeDeviceFlow(t *testing.T) {
+	a, _, _ := appFixture(t)
+	a.Auth = deviceFunc(func(context.Context, func(auth.DevicePrompt) error) ([]byte, error) {
+		t.Fatal("invalid alias started device flow")
+		return nil, nil
+	})
+	if a.Run(context.Background(), []string{"add", "bad/alias"}) == 0 {
+		t.Fatal("invalid alias succeeded")
+	}
+	if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
+		t.Fatal("invalid alias touched state")
+	}
+}
+
+func TestAliasCommandOnlyChangesDisplayMetadata(t *testing.T) {
+	a, out, _ := appFixture(t)
+	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, err := accounts.ParseNativeAuth(quotaAuth("account", "secret-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Save(native, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := a.Run(context.Background(), []string{"alias", "work", "personal", "--json"}); code != 0 {
+		t.Fatalf("alias exited %d: %s", code, out.String())
+	}
+	after, err := store.Find(before.ID)
+	if err != nil || after.Alias != "personal" || after.UserID != before.UserID || after.AccountID != before.AccountID {
+		t.Fatalf("alias changed identity: before=%+v after=%+v err=%v", before, after, err)
+	}
+	if strings.Contains(out.String(), "secret-token") {
+		t.Fatal("alias receipt exposed credentials")
+	}
+}

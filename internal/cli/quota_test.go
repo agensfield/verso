@@ -271,9 +271,18 @@ func TestQuotaCommandWasRemoved(t *testing.T) {
 
 func TestQuotaSummaryUsesActualAttemptCount(t *testing.T) {
 	saved := []accounts.Account{{ID: "one"}, {ID: "two"}}
-	result := summarizeQuotas(saved, map[string]quota.Entry{"one": {Quota: &auth.Quota{}}}, 1)
-	if result.Attempted != 1 || result.Available != 1 || result.Failed != 1 || result.Complete {
+	result := summarizeQuotas(saved, map[string]quota.Entry{"one": {Quota: &auth.Quota{}}}, 1, true)
+	if result.Attempted != 1 || result.Available != 1 || result.Failed != 0 || result.Skipped != 1 || result.Complete {
 		t.Fatalf("unexpected partial summary: %+v", result)
+	}
+}
+
+func TestQuotaSummarySeparatesStaleAvailabilityFromRefreshFailure(t *testing.T) {
+	saved := []accounts.Account{{ID: "one"}}
+	entries := map[string]quota.Entry{"one": {Quota: &auth.Quota{}, Stale: true, Warning: "quota unavailable; previous observation may be stale"}}
+	result := summarizeQuotas(saved, entries, 1, true)
+	if result.Available != 1 || result.Failed != 1 || result.Complete {
+		t.Fatalf("stale availability hid refresh failure: %+v", result)
 	}
 }
 func TestSwitchCommandRejectsAgentBeforeInspection(t *testing.T) {

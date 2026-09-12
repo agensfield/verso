@@ -67,6 +67,13 @@ type response struct {
 	Contract    *contractMetadata      `json:"contract,omitempty"`
 	Selection   *selectionMetadata     `json:"selection,omitempty"`
 	QuotaState  *quotaMetadata         `json:"quota_observation,omitempty"`
+	Inventory   *inventoryMetadata     `json:"account_inventory,omitempty"`
+}
+
+type inventoryMetadata struct {
+	Complete bool                    `json:"complete"`
+	Issues   []accounts.AccountIssue `json:"issues"`
+	Error    string                  `json:"error,omitempty"`
 }
 
 type versionMetadata struct {
@@ -89,10 +96,12 @@ type selectionMetadata struct {
 }
 
 type quotaMetadata struct {
-	Complete  bool `json:"complete"`
-	Attempted int  `json:"attempted"`
-	Available int  `json:"available"`
-	Failed    int  `json:"failed"`
+	Source    string `json:"source"`
+	Complete  bool   `json:"complete"`
+	Attempted int    `json:"attempted"`
+	Available int    `json:"available"`
+	Failed    int    `json:"failed"`
+	Skipped   int    `json:"skipped"`
 }
 
 type quotaWire struct {
@@ -136,6 +145,7 @@ Usage: verso <command>
   switch [account]      Switch accounts
   add [alias]           Add an account
   import [alias]        Save your current login
+  alias <account> <new> Rename a saved account
   remove <account>      Remove a saved account
   preview <account>     Check before switching
 
@@ -257,6 +267,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if command == "import" || command == "remove" {
 		return a.accountMutation(ctx, command, pos)
 	}
+	if command == "alias" {
+		return a.aliasAccount(ctx, pos)
+	}
 	if command == "add" {
 		return a.add(ctx, pos)
 	}
@@ -289,21 +302,22 @@ func (a *App) Run(ctx context.Context, args []string) int {
 			r.Message += " A Herdr checkpoint is available; use --json to view its recovery metadata. Check current panes before recreating any clients."
 		}
 		if store, openErr := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts")); openErr == nil {
-			r.Accounts, _ = store.List()
+			r.Accounts, _, _ = store.ListPartial()
 		}
 		return a.finish(r, nil)
 	}
-	store, err := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts"))
-	if err != nil {
-		return a.finish(response{Command: command}, err)
+	store, storeErr := accounts.OpenReadOnly(filepath.Join(a.StateDir, "accounts"))
+	saved := []accounts.Account{}
+	issues := []accounts.AccountIssue{}
+	if storeErr == nil {
+		saved, issues, storeErr = store.ListPartial()
 	}
-	saved, err := store.List()
-	if err != nil {
-		return a.finish(response{Command: command}, err)
-	}
-	r := response{Command: command, Accounts: saved}
+	r := response{Command: command, Accounts: saved, Inventory: inventoryResult(issues, storeErr)}
 	if command == "preview" {
-		target, e := store.Find(pos[0])
+		if storeErr != nil {
+			return a.finish(r, storeErr)
+		}
+		target, e := findInspectionAccount(store, saved, issues, pos[0])
 		if e != nil {
 			return a.finish(r, e)
 		}
@@ -312,6 +326,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		if e != nil {
 			return a.finish(r, e)
 		}
+		a.progress("Inspecting switch conditions...")
 		plan, e := (switcher.Engine{Backend: backend}).Preview(ctx, switcher.Request{Target: target.ID, AllowExhausted: *allowExhausted, AllowNoSnapshot: *allowNoSnapshot})
 		r.Plan = &plan
 		r.Message = "Preview only; no credentials were refreshed or activated."
@@ -321,6 +336,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if err != nil {
 		return a.finish(r, err)
 	}
+	a.progress("Inspecting Codex runtime...")
 	o, err := inspector.Inspect(ctx)
 	r.Runtime = &o
 	if err != nil {
@@ -328,6 +344,38 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 
 	return a.finish(r, nil)
+}
+
+func inventoryResult(issues []accounts.AccountIssue, err error) *inventoryMetadata {
+	result := &inventoryMetadata{Complete: err == nil && len(issues) == 0, Issues: issues}
+	if result.Issues == nil {
+		result.Issues = []accounts.AccountIssue{}
+	}
+	if err != nil {
+		result.Error = "account inventory unavailable"
+	}
+	return result
+}
+
+func findInspectionAccount(store *accounts.Store, saved []accounts.Account, issues []accounts.AccountIssue, query string) (accounts.Account, error) {
+	account, err := store.Find(query)
+	if err == nil || len(issues) == 0 {
+		return account, err
+	}
+	matches := make([]accounts.Account, 0, 1)
+	for _, candidate := range saved {
+		if candidate.ID == query || candidate.Alias == query || candidate.Email == query {
+			matches = append(matches, candidate)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return accounts.Account{}, err
+	case 1:
+		return matches[0], nil
+	default:
+		return accounts.Account{}, accounts.ErrAmbiguous
+	}
 }
 
 func (a *App) versionResponse() response {
@@ -370,6 +418,10 @@ func contractText(contract *contractMetadata) string {
 }
 
 func (a *App) finish(r response, err error) int {
+	if err != nil && r.Plan != nil && !r.Plan.UnfinishedKnown {
+		err = switcher.ErrRecoveryRequired
+	}
+	err = publicError(err)
 	if r.Accounts == nil {
 		r.Accounts = []accounts.Account{}
 	}
@@ -420,6 +472,11 @@ func (a *App) finish(r response, err error) int {
 		}
 		if r.Plan != nil {
 			writef(a.Out, "%s %s\n", a.humanHeading("Codex:"), r.Plan.Daemon)
+			if !r.Plan.UnfinishedKnown {
+				writef(a.Out, "%s unavailable\n", a.humanHeading("Recovery journal:"))
+			} else if r.Plan.Unfinished {
+				writef(a.Out, "%s unfinished switch recorded\n", a.humanHeading("Recovery journal:"))
+			}
 			if len(r.Plan.Busy) > 0 {
 				writef(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Plan.Busy))
 			}
@@ -428,19 +485,32 @@ func (a *App) finish(r response, err error) int {
 			}
 		}
 		if r.Runtime != nil {
-			writef(a.Out, "%s %s\n%s %s\n%s %s\n", a.humanHeading("Codex:"), r.Runtime.Daemon, a.humanHeading("Credentials:"), r.Runtime.Config.CredentialStore, a.humanHeading("Selected login:"), selectedAccountName(r))
-			writef(a.Out, "%s %s\n", a.humanHeading("Credential proof:"), credentialProofLabel(r.Runtime.Credential))
-			if r.Runtime.Credential.Reason != "" {
-				writef(a.Out, "%s %s\n", a.humanHeading("Credential detail:"), r.Runtime.Credential.Reason)
+			writef(a.Out, "%s\n", a.humanHeading("Account: "+selectedAccountName(r)))
+			writef(a.Out, "  Daemon: %s\n", r.Runtime.Daemon)
+			writef(a.Out, "  Login: %s\n", loginStatus(r.Runtime))
+			if r.Runtime.ActivityKnown {
+				writef(a.Out, "  Conversations: %s\n", conversationStatus(len(r.Runtime.Busy)))
+			} else {
+				writef(a.Out, "  Conversations: %s\n", unavailableConversationStatus(r.Runtime.ActivityError))
 			}
+			warnings := append([]string{}, r.Runtime.Warnings...)
 			if r.Runtime.Credential.Warning != "" {
-				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), r.Runtime.Credential.Warning)
+				warnings = append([]string{r.Runtime.Credential.Warning}, warnings...)
 			}
-			if len(r.Runtime.Busy) > 0 {
-				writef(a.Out, "%s %d\n", a.humanHeading("Busy conversations:"), len(r.Runtime.Busy))
-			}
-			for _, warning := range r.Runtime.Warnings {
+			seenWarnings := map[string]bool{}
+			for _, warning := range warnings {
+				if warning == "" || seenWarnings[warning] {
+					continue
+				}
+				seenWarnings[warning] = true
 				writef(a.Out, "%s %s\n", a.humanHeading("Warning:"), warning)
+			}
+		}
+		if r.Inventory != nil && !r.Inventory.Complete {
+			if r.Inventory.Error != "" {
+				writef(a.Out, "%s %s\n", a.humanHeading("Account inventory:"), r.Inventory.Error)
+			} else {
+				writef(a.Out, "%s %s; healthy entries shown only\n", a.humanHeading("Account inventory:"), accountIssueCount(len(r.Inventory.Issues)))
 			}
 		}
 		if r.Target != nil {
@@ -460,6 +530,30 @@ func (a *App) finish(r response, err error) int {
 		return 1
 	}
 	return 0
+}
+
+func publicError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, switcher.ErrRecoveryRequired) {
+		return switcher.ErrRecoveryRequired
+	}
+	for _, known := range []error{
+		accounts.ErrNotFound, accounts.ErrAmbiguous, accounts.ErrUnsafePath,
+		accounts.ErrUnknownActive, accounts.ErrActiveAccount, accounts.ErrIdentityMismatch,
+		accounts.ErrInvalidSchema, accounts.ErrInvalidAlias, accounts.ErrAliasConflict,
+		accounts.ErrReadOnly,
+	} {
+		if errors.Is(err, known) {
+			return known
+		}
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return errors.New("filesystem operation failed")
+	}
+	return err
 }
 
 type invocationIntent struct {
@@ -540,6 +634,8 @@ func flagsOutside(seen map[string]bool, allowed ...string) bool {
 func classifyError(command string, err error) (string, string) {
 	message := err.Error()
 	switch {
+	case errors.Is(err, switcher.ErrRecoveryRequired):
+		return "recovery_required", "run verso recovery --json"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "cancelled", "retry when ready"
 	case errors.Is(err, accounts.ErrNotFound):
@@ -555,13 +651,13 @@ func classifyError(command string, err error) (string, string) {
 	case errors.Is(err, switcher.ErrUnknown):
 		return "inspection_unavailable", "run verso status --json"
 	case errors.Is(err, switcher.ErrBusy), errors.Is(err, switcher.ErrBackend), errors.Is(err, switcher.ErrChanged), errors.Is(err, switcher.ErrExhausted):
-		return "safety_refusal", "review verso preview --json before retrying"
-	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for") || strings.Contains(message, "unexpected or missing") || strings.Contains(message, "command-only flag"):
+		return "safety_refusal", "review the target with verso preview ACCOUNT --json"
+	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for") || strings.Contains(message, "unexpected or missing") || strings.Contains(message, "command-only flag") || strings.HasPrefix(message, "use --") || strings.HasPrefix(message, "use verso --"):
 		if _, ok := commandHelp[command]; ok && command != "options" {
 			return "invalid_arguments", "run verso help " + command
 		}
 		return "invalid_arguments", "run verso --help"
-	case strings.Contains(message, "unfinished") || strings.Contains(message, "recovery"):
+	case command == "recovery":
 		return "recovery_required", "run verso recovery --json"
 	case strings.Contains(message, "unknown command"):
 		if command == "quota" {
@@ -582,6 +678,8 @@ func writeExit(out io.Writer, value string) int {
 
 func credentialProofLabel(proof codex.CredentialProof) string {
 	switch proof.Status {
+	case codex.CredentialLocalFile:
+		return "effective local file mode resolved"
 	case codex.CredentialFileSelected:
 		return "selected login matches effective file mode"
 	case codex.CredentialFreshProcess:
@@ -591,6 +689,43 @@ func credentialProofLabel(proof codex.CredentialProof) string {
 	default:
 		return "unverified (see JSON for status)"
 	}
+}
+
+func loginStatus(runtime *codex.Observation) string {
+	status := credentialProofLabel(runtime.Credential)
+	if runtime.Credential.Status == codex.CredentialUnknown || runtime.Credential.Status == "" {
+		if runtime.Credential.Reason != "" {
+			return status + ": " + runtime.Credential.Reason
+		}
+		if runtime.Config.CredentialStore != "" {
+			return status + "; configured store is " + runtime.Config.CredentialStore
+		}
+	}
+	return status
+}
+
+func conversationStatus(busy int) string {
+	if busy == 0 {
+		return "none busy observed"
+	}
+	if busy == 1 {
+		return "1 busy conversation observed"
+	}
+	return fmt.Sprintf("%d busy conversations observed", busy)
+}
+
+func unavailableConversationStatus(detail string) string {
+	if detail == "" {
+		return "check unavailable"
+	}
+	return "check unavailable: " + detail
+}
+
+func accountIssueCount(count int) string {
+	if count == 1 {
+		return "1 saved account issue"
+	}
+	return fmt.Sprintf("%d saved account issues", count)
 }
 
 func recoveryPhase(phase string) string {

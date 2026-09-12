@@ -11,6 +11,7 @@ var commandHelp = map[string]string{
 	"switch":   "verso switch [account] [--allow-exhausted] [--allow-no-snapshot]\n\nChoose an account, review the checks, and confirm the switch.\nOmit the account to open the picker.\n",
 	"add":      "verso add [alias]\n\nSign in with a device code and save the account. Your selected account stays put.\n",
 	"import":   "verso import [alias] [--json]\n\nSave your current Codex login. The alias defaults to your email.\n",
+	"alias":    "verso alias <account> <alias> [--json]\n\nRename a saved account. This changes display metadata only.\n",
 	"remove":   "verso remove <account> [--json]\n\nRemove a saved account. The selected account cannot be removed.\n",
 	"preview":  "verso preview <account> [--allow-exhausted] [--allow-no-snapshot] [--json]\n\nCheck a switch without refreshing credentials or changing accounts.\n--allow-exhausted permits a target known to be exhausted.\n--allow-no-snapshot permits switching when Herdr recovery capture fails.\n",
 	"status":   "verso status [--json]\n\nShow the selected login and Codex runtime status.\n",

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,21 +80,28 @@ func TestHumanStatusAndTargetUseOperatorLabels(t *testing.T) {
 		SelectedFile:  accounts.ActiveIdentity{Known: true, UserID: "user", AccountID: "workspace"},
 		SelectedEmail: "same@example.test",
 		Busy:          []string{"hidden-turn-1", "hidden-turn-2"},
+		ActivityKnown: true,
+		Clients:       []codex.Client{{PID: 4242, Kind: codex.ClientAttached}, {PID: 4343, Kind: codex.ClientUnknown}},
+		Credential:    codex.CredentialProof{Warning: "synthetic warning"},
+		Warnings:      []string{"synthetic warning"},
 	}
 	plan := &switcher.Plan{Inspection: switcher.Inspection{Daemon: switcher.Running, Busy: []string{"hidden-plan-turn"}}}
 	if code := a.finish(response{Command: "preview", Accounts: []accounts.Account{account}, Runtime: runtime, Plan: plan, Target: &account}, nil); code != 0 {
 		t.Fatal(code)
 	}
 	got := out.String()
-	for _, want := range []string{"Codex: running", "Credentials: file", "Account: personal", "Busy conversations: 1", "Busy conversations: 2"} {
+	for _, want := range []string{"Codex: running", "Busy conversations: 1", "Account: personal", "Daemon: running", "Login: unverified; configured store is file", "Conversations: 2 busy conversations observed"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
 		}
 	}
-	for _, hidden := range []string{"Target:", `"personal"`, "same@example.test", "hidden-id", "hidden-turn", "Selected file identity", "Credential mode"} {
+	for _, hidden := range []string{"Target:", `"personal"`, "same@example.test", "hidden-id", "hidden-turn", "4242", "4343", "Credential proof", "Credential detail", "Process candidates", "Selected file identity", "Credential mode"} {
 		if strings.Contains(got, hidden) {
 			t.Errorf("human output contains %q:\n%s", hidden, got)
 		}
+	}
+	if strings.Count(got, "synthetic warning") != 1 {
+		t.Fatalf("warning was duplicated: %s", got)
 	}
 	if strings.Contains(got, "\x1b[") {
 		t.Fatal("piped status contains ANSI")
@@ -245,6 +254,19 @@ func TestUnknownCommandDiagnosticsDoNotEchoTerminalControls(t *testing.T) {
 	}
 }
 
+func TestShortcutFlagErrorsAreInvalidArguments(t *testing.T) {
+	for _, args := range [][]string{{"--skill", "--check=false", "--json"}, {"--version", "--cached=false", "--json"}} {
+		a, out, _ := appFixture(t)
+		if code := a.Run(context.Background(), args); code == 0 {
+			t.Fatalf("accepted %v", args)
+		}
+		var result response
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil || result.ErrorCode != "invalid_arguments" {
+			t.Fatalf("%v: %s", args, out.String())
+		}
+	}
+}
+
 func TestOfflineSchemaAndTypedVersionMetadata(t *testing.T) {
 	for _, args := range [][]string{{"schema", "--json"}, {"version", "--json"}, {"--version", "--json"}, {"--skill", "--json"}} {
 		a, out, _ := appFixture(t)
@@ -296,5 +318,85 @@ func TestRecoveryIsReadOnlyAndReportsUnfinishedOperation(t *testing.T) {
 	after, _ := os.ReadFile(name)
 	if string(after) != string(raw) {
 		t.Fatal("recovery changed journal")
+	}
+}
+
+func TestCorruptAccountDoesNotHideRuntimeOrHealthyExactLookup(t *testing.T) {
+	a, out, _ := appFixture(t)
+	a.CredentialResolver = fixtureResolver{}
+	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodAuth, _ := accounts.ParseNativeAuth(quotaAuth("good", "good-token"))
+	badAuth, _ := accounts.ParseNativeAuth(quotaAuth("bad", "bad-token"))
+	good, err := store.Save(goodAuth, "good")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, err := store.Save(badAuth, "bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.StateDir, "accounts", bad.ID+".json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := a.Run(context.Background(), []string{"status", "--json"}); code != 0 {
+		t.Fatalf("status exited %d: %s", code, out.String())
+	}
+	var status response
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil || status.Runtime == nil || status.Inventory == nil || status.Inventory.Complete {
+		t.Fatalf("status lost partial evidence: %s", out.String())
+	}
+	out.Reset()
+	if code := a.Run(context.Background(), []string{"list", good.ID, "--cached", "--json"}); code != 0 {
+		t.Fatalf("healthy exact lookup exited %d: %s", code, out.String())
+	}
+	var listed response
+	if err := json.Unmarshal(out.Bytes(), &listed); err != nil || len(listed.Accounts) != 1 || listed.Accounts[0].ID != good.ID || listed.Inventory.Complete {
+		t.Fatalf("healthy exact lookup lost completeness: %s", out.String())
+	}
+}
+
+func TestAccountStoreDiagnosticsDoNotExposeUnsafeEntryNames(t *testing.T) {
+	for _, command := range []string{"list", "preview", "alias"} {
+		a, out, errOut := appFixture(t)
+		store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		native, _ := accounts.ParseNativeAuth(quotaAuth("work", "secret"))
+		if _, err := store.Save(native, "work"); err != nil {
+			t.Fatal(err)
+		}
+		unsafeName := "SENSITIVE-ENTRY-NAME.json"
+		if err := os.WriteFile(filepath.Join(a.StateDir, "accounts", unsafeName), []byte("SENSITIVE-CONTENT"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{command, "missing", "--json"}
+		if command == "list" {
+			args = append(args, "--cached")
+		}
+		if command == "alias" {
+			args = []string{command, "work", "new", "--json"}
+		}
+		if a.Run(context.Background(), args) == 0 {
+			t.Fatalf("%s unexpectedly succeeded", command)
+		}
+		if strings.Contains(out.String()+errOut.String(), "SENSITIVE") {
+			t.Fatalf("%s exposed unsafe entry: %s", command, out.String())
+		}
+	}
+}
+
+func TestSanitizedAccountErrorPreservesRecoveryRequirement(t *testing.T) {
+	unsafe := fmt.Errorf("%w: %w", switcher.ErrRecoveryRequired, fmt.Errorf("%w: SENSITIVE-ENTRY-NAME.json", accounts.ErrUnsafePath))
+	public := publicError(unsafe)
+	if strings.Contains(public.Error(), "SENSITIVE") || !errors.Is(public, switcher.ErrRecoveryRequired) {
+		t.Fatalf("unsafe or incomplete public error: %q", public)
+	}
+	code, hint := classifyError("switch", public)
+	if code != "recovery_required" || hint != "run verso recovery --json" {
+		t.Fatalf("classification = %q, %q", code, hint)
 	}
 }

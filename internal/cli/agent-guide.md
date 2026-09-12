@@ -41,6 +41,12 @@ observation. `accounts` is an empty array when none are saved. `selection.status
 states whether selection was verified, unmatched, absent, unknown, or not inspected.
 `quota_observation.complete` can be false while `ok` remains true because saved
 account discovery succeeded independently of one or more quota requests.
+`account_inventory.complete: false` means healthy accounts are partial and mutations
+remain strict. `status` still reports independent runtime evidence when the saved
+inventory is damaged. Runtime `activityKnown` and `activityError` describe loaded
+conversation inspection separately. `clients` is a bounded process-candidate
+inventory; `attached` records explicit attachment intent, not a live socket
+attestation, while `unknown` must remain advisory.
 
 ## Save or inspect accounts when requested
 
@@ -92,6 +98,11 @@ Common safe failure handling:
 - `cancelled`: no approval is implied; let the operator retry when ready.
 - `recovery_required`: inspect `recovery --json` before another mutation.
 - `invalid_arguments`: follow the returned hint or command help.
+
+`recovery_required` can appear with `switch_result.changed: false` after the daemon
+has stopped, or with `switch_result.rollbackSucceeded: true` when completed rollback
+journal cleanup is still uncertain. Neither field alone proves that no effects
+occurred or that an immediate retry is safe. Inspect recovery first.
 
 With a managed daemon, visible active turns block switching, including approval
 and input waits. Unknown or unreachable daemon state also blocks. Do not force

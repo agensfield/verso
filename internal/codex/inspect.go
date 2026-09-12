@@ -737,9 +737,15 @@ func loadedBusy(ctx context.Context, rpc *RPC) ([]string, error) {
 			switch thread.Thread.Status.Type {
 			case "active":
 				busy = append(busy, id)
-			case "idle", "notLoaded":
+			case "idle", "notLoaded", "systemError":
+				// Codex 0.154 reports systemError only after running and pending
+				// approval/input state have cleared. It can retain a past quota
+				// failure until the next turn; it is not an active turn.
+				if len(thread.Thread.Status.Flags) != 0 {
+					return nil, errors.New("loaded thread has inconsistent activity status")
+				}
 			default:
-				return nil, errors.New("loaded thread has an unknown/error status")
+				return nil, errors.New("loaded thread has an unknown status")
 			}
 		}
 		if reply.NextCursor == nil || *reply.NextCursor == "" {

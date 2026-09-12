@@ -233,13 +233,35 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 				t.Errorf("unsafe identity RPC called: %s", req.Method)
 				return
 			case "thread/loaded/list":
-				reply = map[string]any{"data": []string{"thread-a"}, "nextCursor": nil}
+				ids := []string{"thread-a"}
+				if status == "errorThenActive" {
+					ids = []string{"thread-a", "thread-b"}
+				}
+				reply = map[string]any{"data": ids, "nextCursor": nil}
 			case "thread/read":
 				threadStatus := status
 				if status == "noLayers" {
 					threadStatus = "idle"
 				}
-				reply = map[string]any{"thread": map[string]any{"status": map[string]any{"type": threadStatus, "activeFlags": []string{"waitingOnApproval"}}}}
+				if status == "errorThenActive" {
+					var params struct {
+						ThreadID string `json:"threadId"`
+					}
+					_ = json.Unmarshal(req.Params, &params)
+					threadStatus = "systemError"
+					if params.ThreadID == "thread-b" {
+						threadStatus = "active"
+					}
+				}
+				wireStatus := map[string]any{"type": threadStatus}
+				if threadStatus == "active" {
+					wireStatus["activeFlags"] = []string{"waitingOnApproval"}
+				}
+				if status == "inconsistent" {
+					wireStatus["type"] = "systemError"
+					wireStatus["activeFlags"] = []string{"waitingOnUserInput"}
+				}
+				reply = map[string]any{"thread": map[string]any{"status": wireStatus}}
 			default:
 				reply = map[string]any{}
 			}
@@ -252,11 +274,11 @@ func managedFixture(t *testing.T, status string) (Inspector, func()) {
 	return i, cleanup
 }
 func TestManagedRPCBusyAndIdle(t *testing.T) {
-	for _, status := range []string{"idle", "active", "systemError"} {
+	for _, status := range []string{"idle", "active", "systemError", "futureStatus", "inconsistent"} {
 		t.Run(status, func(t *testing.T) {
 			i, _ := managedFixture(t, status)
 			o, err := i.Inspect(context.Background())
-			if status == "systemError" {
+			if status == "futureStatus" || status == "inconsistent" {
 				if err == nil || o.Daemon != switcher.Running || o.ActivityKnown || o.ActivityError == "" {
 					t.Fatalf("%+v %v", o, err)
 				}
@@ -426,7 +448,7 @@ func TestManagedDefaultOpenAIProviderIsRecognized(t *testing.T) {
 }
 
 func TestSelectionInspectionDoesNotRequireHealthyThreads(t *testing.T) {
-	i, _ := managedFixture(t, "systemError")
+	i, _ := managedFixture(t, "futureStatus")
 	selected, err := i.InspectSelection(context.Background())
 	if err != nil || selected.Daemon != switcher.Running || selected.Credential.Status != CredentialFileSelected {
 		t.Fatalf("%+v %v", selected.Credential, err)
@@ -616,5 +638,13 @@ func TestClientInventoryIsBoundedAndWarningsAreAggregated(t *testing.T) {
 		if strings.Contains(warning, "1000") {
 			t.Fatalf("warning leaked per-process identity: %q", warning)
 		}
+	}
+}
+
+func TestHistoricalErrorDoesNotHideLaterActiveTurn(t *testing.T) {
+	i, _ := managedFixture(t, "errorThenActive")
+	o, err := i.Inspect(context.Background())
+	if err != nil || !o.ActivityKnown || o.Daemon != switcher.Running || len(o.Busy) != 1 || o.Busy[0] != "thread-b" {
+		t.Fatalf("observation=%+v err=%v", o, err)
 	}
 }

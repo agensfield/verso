@@ -99,6 +99,11 @@ Common safe failure handling:
 - `recovery_required`: inspect `recovery --json` before another mutation.
 - `invalid_arguments`: follow the returned hint or command help.
 
+`recovery_required` can appear with `switch_result.changed: false` after the daemon
+has stopped, or with `switch_result.rollbackSucceeded: true` when completed rollback
+journal cleanup is still uncertain. Neither field alone proves that no effects
+occurred or that an immediate retry is safe. Inspect recovery first.
+
 With a managed daemon, visible active turns block switching, including approval
 and input waits. Unknown or unreachable daemon state also blocks. Do not force
 cancellation or call a failed probe proof of absence. Background work is not fully

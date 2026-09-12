@@ -418,6 +418,9 @@ func contractText(contract *contractMetadata) string {
 }
 
 func (a *App) finish(r response, err error) int {
+	if err != nil && r.Plan != nil && !r.Plan.UnfinishedKnown {
+		err = switcher.ErrRecoveryRequired
+	}
 	err = publicError(err)
 	if r.Accounts == nil {
 		r.Accounts = []accounts.Account{}
@@ -533,6 +536,9 @@ func publicError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, switcher.ErrRecoveryRequired) {
+		return switcher.ErrRecoveryRequired
+	}
 	for _, known := range []error{
 		accounts.ErrNotFound, accounts.ErrAmbiguous, accounts.ErrUnsafePath,
 		accounts.ErrUnknownActive, accounts.ErrActiveAccount, accounts.ErrIdentityMismatch,
@@ -540,15 +546,6 @@ func publicError(err error) error {
 		accounts.ErrReadOnly,
 	} {
 		if errors.Is(err, known) {
-			message := err.Error()
-			switch {
-			case strings.Contains(message, "cannot preserve outgoing credentials"):
-				return fmt.Errorf("cannot preserve outgoing credentials; recovery required: %w", known)
-			case strings.Contains(message, "target activation failed"):
-				return fmt.Errorf("target activation failed; recovery required: %w", known)
-			case strings.Contains(message, "rollback credential restore failed"):
-				return fmt.Errorf("rollback failed; inspect recovery before further changes: %w", known)
-			}
 			return known
 		}
 	}
@@ -637,6 +634,8 @@ func flagsOutside(seen map[string]bool, allowed ...string) bool {
 func classifyError(command string, err error) (string, string) {
 	message := err.Error()
 	switch {
+	case errors.Is(err, switcher.ErrRecoveryRequired):
+		return "recovery_required", "run verso recovery --json"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "cancelled", "retry when ready"
 	case errors.Is(err, accounts.ErrNotFound):
@@ -645,8 +644,6 @@ func classifyError(command string, err error) (string, string) {
 		return "account_ambiguous", "use an alias or ID from verso list --cached --json"
 	case errors.Is(err, accounts.ErrInvalidAlias), errors.Is(err, accounts.ErrAliasConflict):
 		return "invalid_alias", "choose a distinct account alias"
-	case strings.Contains(message, "recovery required") || strings.Contains(message, "inspect recovery"):
-		return "recovery_required", "run verso recovery --json"
 	case errors.Is(err, accounts.ErrUnsafePath), errors.Is(err, accounts.ErrActiveAccount), errors.Is(err, accounts.ErrUnknownActive):
 		return "safety_refusal", "inspect with verso status --json before retrying"
 	case errors.Is(err, switcher.ErrUnfinished):
@@ -654,13 +651,13 @@ func classifyError(command string, err error) (string, string) {
 	case errors.Is(err, switcher.ErrUnknown):
 		return "inspection_unavailable", "run verso status --json"
 	case errors.Is(err, switcher.ErrBusy), errors.Is(err, switcher.ErrBackend), errors.Is(err, switcher.ErrChanged), errors.Is(err, switcher.ErrExhausted):
-		return "safety_refusal", "review verso preview --json before retrying"
+		return "safety_refusal", "review the target with verso preview ACCOUNT --json"
 	case strings.Contains(message, "usage:") || strings.Contains(message, "invalid arguments") || strings.Contains(message, "not valid for") || strings.Contains(message, "unexpected or missing") || strings.Contains(message, "command-only flag") || strings.HasPrefix(message, "use --") || strings.HasPrefix(message, "use verso --"):
 		if _, ok := commandHelp[command]; ok && command != "options" {
 			return "invalid_arguments", "run verso help " + command
 		}
 		return "invalid_arguments", "run verso --help"
-	case strings.Contains(message, "unfinished") || strings.Contains(message, "recovery"):
+	case command == "recovery":
 		return "recovery_required", "run verso recovery --json"
 	case strings.Contains(message, "unknown command"):
 		if command == "quota" {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -389,9 +390,9 @@ func TestAccountStoreDiagnosticsDoNotExposeUnsafeEntryNames(t *testing.T) {
 }
 
 func TestSanitizedAccountErrorPreservesRecoveryRequirement(t *testing.T) {
-	unsafe := fmt.Errorf("cannot preserve outgoing credentials; recovery required: %w", fmt.Errorf("%w: SENSITIVE-ENTRY-NAME.json", accounts.ErrUnsafePath))
+	unsafe := fmt.Errorf("%w: %w", switcher.ErrRecoveryRequired, fmt.Errorf("%w: SENSITIVE-ENTRY-NAME.json", accounts.ErrUnsafePath))
 	public := publicError(unsafe)
-	if strings.Contains(public.Error(), "SENSITIVE") || !strings.Contains(public.Error(), "recovery required") {
+	if strings.Contains(public.Error(), "SENSITIVE") || !errors.Is(public, switcher.ErrRecoveryRequired) {
 		t.Fatalf("unsafe or incomplete public error: %q", public)
 	}
 	code, hint := classifyError("switch", public)

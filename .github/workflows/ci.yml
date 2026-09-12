@@ -44,3 +44,6 @@ jobs:
           "$RUNNER_TEMP/verso" licenses > "$RUNNER_TEMP/verso-licenses"
       - name: Isolated standalone PTY transaction
         run: python3 scripts/smoke/standalone.py "$RUNNER_TEMP/verso"
+
+      - name: Isolated CLI contract and cancellation flows
+        run: python3 scripts/smoke/cli.py "$RUNNER_TEMP/verso"

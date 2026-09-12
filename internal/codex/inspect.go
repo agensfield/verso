@@ -259,7 +259,7 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 	}
 	servers := 0
 	var publicServers []Process
-	managedOverride := ""
+	runtimeRoleUncertain := false
 	clientCounts := make(map[ClientKind]int)
 	clientsSeen := 0
 	addClient := func(client Client) {
@@ -274,23 +274,24 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 		if len(fields) == 0 || !i.isCodex(fields[0]) {
 			continue
 		}
-		if len(fields) > 1 && fields[1] == "app-server" {
-			if len(fields) > 2 && (fields[2] == "daemon" || fields[2] == "proxy" || strings.HasPrefix(fields[2], "generate-")) {
-				continue
-			}
-			if privateServer(fields[2:]) {
+		role, roleArgs := classifyProcessRole(fields)
+		switch role {
+		case processIgnored:
+			continue
+		case processUncertain:
+			runtimeRoleUncertain = true
+			continue
+		case processServer:
+			if privateServer(roleArgs) {
 				addClient(Client{PID: p.PID, Kind: ClientStandalone, Basis: "private-app-server-process"})
 			} else {
 				servers++
 				publicServers = append(publicServers, p)
-				if managedOverride == "" {
-					managedOverride = commandConfigOverride(fields[2:])
-				}
 			}
 			continue
+		case processCandidate:
+			addClient(Client{PID: p.PID, Kind: ClientUnknown, Basis: "command-metadata-unverified"})
 		}
-		kind, basis := classifyClientIntent(fields, i.Socket())
-		addClient(Client{PID: p.PID, Kind: kind, Basis: basis})
 	}
 	_, socketErr := os.Lstat(i.Socket())
 	if socketErr != nil && !errors.Is(socketErr, os.ErrNotExist) {
@@ -321,7 +322,8 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 					return o, errors.New("daemon PID record does not match process birth identity")
 				}
 				fields := strings.Fields(p.Command)
-				if len(fields) < 2 || !i.isCodex(fields[0]) || fields[1] != "app-server" {
+				role, _ := classifyProcessRole(fields)
+				if len(fields) < 2 || !i.isCodex(fields[0]) || role != processServer {
 					return o, errors.New("managed PID is not a recognized Codex server")
 				}
 				alive = true
@@ -329,7 +331,7 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 		}
 	}
 	if !alive {
-		if socketErr == nil || servers > 0 {
+		if socketErr == nil || servers > 0 || runtimeRoleUncertain {
 			return o, errors.New("socket or unmanaged app-server exists without a verified managed process")
 		}
 		o.Daemon = switcher.Stopped
@@ -395,6 +397,14 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 	// Runtime identity is established independently of thread activity. Keep
 	// this evidence when the bounded activity inventory is unavailable.
 	o.Daemon, o.Record, o.Version = switcher.Running, record, rpc.Info.UserAgent
+	managedOverride := ""
+	for _, server := range publicServers {
+		if server.PID == record.PID {
+			fields := strings.Fields(server.Command)
+			managedOverride = commandConfigOverride(fields[1:])
+			break
+		}
+	}
 	cwd, cwdErr := i.processCWD(ctx, record.PID)
 	if cwdErr != nil || !filepath.IsAbs(cwd) {
 		o.Credential = unknownCredential("managed process startup cwd is unavailable")
@@ -427,7 +437,7 @@ func clientWarnings(counts map[ClientKind]int) []string {
 		warnings = append(warnings, fmt.Sprintf("%d standalone Codex runtime(s) may retain previous credentials; reopen them after switching", counts[ClientStandalone]))
 	}
 	if counts[ClientUnknown] > 0 {
-		warnings = append(warnings, fmt.Sprintf("attachment could not be verified for %d Codex client(s); some may need reopening after switching", counts[ClientUnknown]))
+		warnings = append(warnings, fmt.Sprintf("attachment could not be verified for %d Codex process candidate(s); some may need reopening after switching", counts[ClientUnknown]))
 	}
 	return warnings
 }
@@ -614,39 +624,91 @@ func (i Inspector) processes(ctx context.Context) ([]Process, error) {
 	return out, nil
 }
 func normalSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
-func classifyClientIntent(args []string, socket string) (ClientKind, string) {
-	remote, explicit := remoteIntent(args)
-	if !explicit {
-		return ClientUnknown, "implicit-auto-connect-or-embedded"
-	}
-	if remote == "unix://"+socket {
-		// This proves launch intent for the selected endpoint, not a live peer
-		// relationship. Basis keeps that boundary machine-readable.
-		return ClientAttached, "explicit-managed-remote-intent"
-	}
-	if remote == "unix://" {
-		return ClientUnknown, "explicit-default-remote-intent"
-	}
-	return ClientUnknown, "explicit-other-remote-intent"
+
+type processRole uint8
+
+const (
+	processUncertain processRole = iota
+	processIgnored
+	processCandidate
+	processServer
+)
+
+var rootOptionsWithValue = map[string]bool{
+	"-c": true, "--config": true, "--enable": true, "--disable": true,
+	"--remote": true, "--remote-auth-token-env": true,
+	"-m": true, "--model": true, "--local-provider": true,
+	"-p": true, "--profile": true, "-s": true, "--sandbox": true,
+	"-C": true, "--cd": true, "--add-dir": true,
+	"-a": true, "--ask-for-approval": true,
 }
 
-func remoteIntent(args []string) (string, bool) {
-	for n := 1; n < len(args); n++ {
-		arg := args[n]
+var rootBooleanOptions = map[string]bool{
+	"--strict-config": true, "--oss": true, "--approve-for-me": true,
+	"--dangerously-bypass-approvals-and-sandbox": true,
+	"--dangerously-bypass-hook-trust":            true, "--worktree": true,
+	"--search": true, "--no-alt-screen": true,
+}
+
+var utilityCommands = map[string]bool{
+	"login": true, "logout": true, "mcp": true, "plugin": true,
+	"remote-control": true, "app": true, "completion": true, "update": true,
+	"doctor": true, "sandbox": true, "apply": true, "a": true,
+	"features": true, "help": true,
+}
+
+// ps command= is flattened text, not an argv vector. This parser recognizes
+// only enough stable root syntax to avoid counting known utility processes and
+// to fail closed on a possible app-server. It never proves client transport.
+func classifyProcessRole(fields []string) (processRole, []string) {
+	for n := 1; n < len(fields); n++ {
+		arg := fields[n]
 		if arg == "--" {
-			break
+			return processCandidate, nil
 		}
-		if arg == "--remote" {
-			if n+1 < len(args) && args[n+1] != "--" {
-				return args[n+1], true
+		if rootOptionsWithValue[arg] {
+			if n+1 >= len(fields) {
+				return processUncertain, nil
 			}
-			return "", true
+			n++
+			continue
 		}
-		if value, ok := strings.CutPrefix(arg, "--remote="); ok {
-			return value, true
+		if arg == "-i" || arg == "--image" {
+			return processUncertain, nil
+		}
+		if arg == "-h" || arg == "--help" || arg == "-V" || arg == "--version" {
+			return processIgnored, nil
+		}
+		if rootBooleanOptions[arg] {
+			continue
+		}
+		if strings.HasPrefix(arg, "--") && strings.Contains(arg, "=") {
+			key, _, _ := strings.Cut(arg, "=")
+			if rootOptionsWithValue[key] {
+				continue
+			}
+			return processUncertain, nil
+		}
+		if strings.HasPrefix(arg, "-") {
+			return processUncertain, nil
+		}
+		switch arg {
+		case "app-server":
+			args := fields[n+1:]
+			for _, candidate := range args {
+				if candidate == "daemon" || candidate == "proxy" || strings.HasPrefix(candidate, "generate-") {
+					return processIgnored, nil
+				}
+			}
+			return processServer, args
+		default:
+			if utilityCommands[arg] {
+				return processIgnored, nil
+			}
+			return processCandidate, nil
 		}
 	}
-	return "", false
+	return processCandidate, nil
 }
 
 func loadedBusy(ctx context.Context, rpc *RPC) ([]string, error) {

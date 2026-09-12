@@ -439,24 +439,68 @@ func TestSelectionInspectionDoesNotRequireHealthyThreads(t *testing.T) {
 	}
 }
 
-func TestClientIntentClassification(t *testing.T) {
+func TestCommandMetadataNeverProvesClientAttachment(t *testing.T) {
 	socket := "/tmp/codex/app-server-control/app-server-control.sock"
 	for _, tc := range []struct {
-		args  []string
-		kind  ClientKind
-		basis string
+		args []string
 	}{
-		{[]string{"codex", "resume", "thread"}, ClientUnknown, "implicit-auto-connect-or-embedded"},
-		{[]string{"codex", "--remote", "unix://" + socket, "resume", "thread"}, ClientAttached, "explicit-managed-remote-intent"},
-		{[]string{"codex", "resume", "--remote=unix://" + socket, "thread"}, ClientAttached, "explicit-managed-remote-intent"},
-		{[]string{"codex", "--remote", "unix://", "resume", "thread"}, ClientUnknown, "explicit-default-remote-intent"},
-		{[]string{"codex", "--remote=unix://relative.sock", "resume", "thread"}, ClientUnknown, "explicit-other-remote-intent"},
-		{[]string{"codex", "--", "prompt", "--remote=unix://" + socket}, ClientUnknown, "implicit-auto-connect-or-embedded"},
+		{[]string{"codex", "resume", "thread"}},
+		{[]string{"codex", "--remote", "unix://" + socket, "resume", "thread"}},
+		{[]string{"codex", "explain", "--remote=unix://" + socket, "safely"}},
+		{[]string{"codex", "--", "prompt", "--remote=unix://" + socket}},
 	} {
-		kind, basis := classifyClientIntent(tc.args, socket)
-		if kind != tc.kind || basis != tc.basis {
-			t.Fatalf("%v = %q %q, want %q %q", tc.args, kind, basis, tc.kind, tc.basis)
+		role, _ := classifyProcessRole(tc.args)
+		if role != processCandidate {
+			t.Fatalf("%v role=%v", tc.args, role)
 		}
+	}
+}
+
+func TestRemoteTextRemainsUnverifiedInObservation(t *testing.T) {
+	for _, command := range []string{
+		"/bin/codex --remote unix://SOCKET resume synthetic-thread",
+		"/bin/codex explain --remote=unix://SOCKET safely",
+	} {
+		home := t.TempDir()
+		testNativeAuth(t, home)
+		i := Inspector{Home: home}
+		command = strings.ReplaceAll(command, "SOCKET", i.Socket())
+		i.Run = func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("1234 " + command + "\n"), nil
+		}
+		o, err := i.Inspect(context.Background())
+		if err != nil || len(o.Clients) != 1 || o.Clients[0].Kind != ClientUnknown || len(o.Warnings) != 1 {
+			t.Fatalf("command=%q observation=%+v err=%v", command, o, err)
+		}
+	}
+}
+
+func TestGlobalOptionsDoNotHideAppServer(t *testing.T) {
+	for _, command := range []string{
+		"/bin/codex app-server --listen unix:///tmp/other.sock",
+		"/bin/codex -c model=synthetic app-server --listen unix:///tmp/other.sock",
+	} {
+		home := t.TempDir()
+		testNativeAuth(t, home)
+		i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("1234 " + command + "\n"), nil
+		}}
+		o, err := i.Inspect(context.Background())
+		if err == nil || o.Daemon != switcher.Unknown || o.ActivityKnown {
+			t.Fatalf("command=%q observation=%+v err=%v", command, o, err)
+		}
+	}
+}
+
+func TestKnownUtilityCommandsAreNotProcessCandidates(t *testing.T) {
+	home := t.TempDir()
+	testNativeAuth(t, home)
+	i := Inspector{Home: home, Run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("1234 /bin/codex --version\n1235 /bin/codex login status\n"), nil
+	}}
+	o, err := i.Inspect(context.Background())
+	if err != nil || len(o.Clients) != 0 || len(o.Warnings) != 0 {
+		t.Fatalf("observation=%+v err=%v", o, err)
 	}
 }
 
@@ -475,7 +519,7 @@ func TestClientInventoryIsBoundedAndWarningsAreAggregated(t *testing.T) {
 	if err != nil || len(o.Clients) != maxClientInventory {
 		t.Fatalf("clients=%d err=%v", len(o.Clients), err)
 	}
-	if len(o.Warnings) != 2 || !strings.Contains(o.Warnings[0], "130 Codex client(s)") || !strings.Contains(o.Warnings[1], "limited to 128") {
+	if len(o.Warnings) != 2 || !strings.Contains(o.Warnings[0], "130 Codex process candidate(s)") || !strings.Contains(o.Warnings[1], "limited to 128") {
 		t.Fatalf("warnings=%v", o.Warnings)
 	}
 	for _, warning := range o.Warnings {

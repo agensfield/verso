@@ -37,7 +37,8 @@ type Request struct {
 type Plan struct {
 	Request
 	Inspection
-	Unfinished bool `json:"unfinished"`
+	Unfinished      bool `json:"unfinished"`
+	UnfinishedKnown bool `json:"unfinishedKnown"`
 }
 
 // Checkpoint contains identities and phases only, never credentials.
@@ -128,10 +129,14 @@ func (e Engine) Preview(ctx context.Context, req Request) (Plan, error) {
 	p := Plan{Request: req}
 	unfinished, unfinishedErr := e.Backend.Unfinished(ctx)
 	p.Unfinished = unfinished
+	p.UnfinishedKnown = unfinishedErr == nil
 	state, inspectErr := e.Backend.Inspect(ctx, req.Target)
 	p.Inspection = state
 	if unfinishedErr != nil {
 		return p, unfinishedErr
+	}
+	if unfinished {
+		return p, ErrUnfinished
 	}
 	if inspectErr != nil {
 		return p, inspectErr

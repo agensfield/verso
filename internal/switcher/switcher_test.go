@@ -256,7 +256,29 @@ func TestPreviewReportsUnfinishedJournalWithObservedState(t *testing.T) {
 	f := fixture()
 	f.unfinished = true
 	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
-	if !errors.Is(err, ErrUnfinished) || !p.Unfinished || p.Target != "B" || p.Active != "A" || !p.ActiveKnown {
+	if !errors.Is(err, ErrUnfinished) || !p.Unfinished || !p.UnfinishedKnown || p.Target != "B" || p.Active != "A" || !p.ActiveKnown {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+}
+
+func TestUnfinishedJournalWinsOverInspectionFailure(t *testing.T) {
+	f := fixture()
+	f.unfinished = true
+	f.fail["inspect"] = ErrExhausted
+	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
+	if !errors.Is(err, ErrUnfinished) || !p.Unfinished || !p.UnfinishedKnown || p.Active != "A" {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+	if _, err := run(f); !errors.Is(err, ErrUnfinished) || has(f, "prepare") {
+		t.Fatalf("execute err=%v events=%v", err, f.events)
+	}
+}
+
+func TestPreviewDistinguishesFailedJournalInspection(t *testing.T) {
+	f := fixture()
+	f.fail["unfinished"] = errors.New("journal unreadable")
+	p, err := (Engine{Backend: f}).Preview(context.Background(), Request{Target: "B"})
+	if err == nil || p.Unfinished || p.UnfinishedKnown || p.Target != "B" || p.Active != "A" {
 		t.Fatalf("p=%+v err=%v", p, err)
 	}
 }

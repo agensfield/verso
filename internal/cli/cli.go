@@ -326,6 +326,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		if e != nil {
 			return a.finish(r, e)
 		}
+		a.progress("Inspecting switch conditions...")
 		plan, e := (switcher.Engine{Backend: backend}).Preview(ctx, switcher.Request{Target: target.ID, AllowExhausted: *allowExhausted, AllowNoSnapshot: *allowNoSnapshot})
 		r.Plan = &plan
 		r.Message = "Preview only; no credentials were refreshed or activated."
@@ -335,6 +336,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if err != nil {
 		return a.finish(r, err)
 	}
+	a.progress("Inspecting Codex runtime...")
 	o, err := inspector.Inspect(ctx)
 	r.Runtime = &o
 	if err != nil {

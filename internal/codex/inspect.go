@@ -280,6 +280,7 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 			continue
 		case processUncertain:
 			runtimeRoleUncertain = true
+			addClient(Client{PID: p.PID, Kind: ClientUnknown, Basis: "command-role-unverified"})
 			continue
 		case processServer:
 			if privateServer(roleArgs) {
@@ -311,6 +312,7 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 		o.Warnings = append(o.Warnings, fmt.Sprintf("Codex client inventory is limited to %d entries", maxClientInventory))
 	}
 	alive := false
+	var managedCommand []string
 	if record != nil {
 		for _, p := range processes {
 			if p.PID == record.PID {
@@ -323,9 +325,10 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 				}
 				fields := strings.Fields(p.Command)
 				role, _ := classifyProcessRole(fields)
-				if len(fields) < 2 || !i.isCodex(fields[0]) || role != processServer {
+				if len(fields) < 2 || !i.isCodex(fields[0]) || (role != processServer && role != processUncertain) {
 					return o, errors.New("managed PID is not a recognized Codex server")
 				}
+				managedCommand = fields
 				alive = true
 			}
 		}
@@ -398,12 +401,8 @@ func (i Inspector) inspect(ctx context.Context, activity bool) (Observation, err
 	// this evidence when the bounded activity inventory is unavailable.
 	o.Daemon, o.Record, o.Version = switcher.Running, record, rpc.Info.UserAgent
 	managedOverride := ""
-	for _, server := range publicServers {
-		if server.PID == record.PID {
-			fields := strings.Fields(server.Command)
-			managedOverride = commandConfigOverride(fields[1:])
-			break
-		}
+	if len(managedCommand) > 1 {
+		managedOverride = commandConfigOverride(managedCommand[1:])
 	}
 	cwd, cwdErr := i.processCWD(ctx, record.PID)
 	if cwdErr != nil || !filepath.IsAbs(cwd) {
@@ -433,11 +432,15 @@ const maxClientInventory = 128
 
 func clientWarnings(counts map[ClientKind]int) []string {
 	var warnings []string
-	if counts[ClientStandalone] > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d standalone Codex runtime(s) may retain previous credentials; reopen them after switching", counts[ClientStandalone]))
+	if counts[ClientStandalone] == 1 {
+		warnings = append(warnings, "1 standalone Codex runtime may retain previous credentials; reopen it after switching")
+	} else if counts[ClientStandalone] > 1 {
+		warnings = append(warnings, fmt.Sprintf("%d standalone Codex runtimes may retain previous credentials; reopen them after switching", counts[ClientStandalone]))
 	}
-	if counts[ClientUnknown] > 0 {
-		warnings = append(warnings, fmt.Sprintf("attachment could not be verified for %d Codex process candidate(s); some may need reopening after switching", counts[ClientUnknown]))
+	if counts[ClientUnknown] == 1 {
+		warnings = append(warnings, "attachment could not be verified for 1 Codex process candidate; it may need reopening after switching")
+	} else if counts[ClientUnknown] > 1 {
+		warnings = append(warnings, fmt.Sprintf("attachment could not be verified for %d Codex process candidates; some may need reopening after switching", counts[ClientUnknown]))
 	}
 	return warnings
 }
@@ -650,16 +653,9 @@ var rootBooleanOptions = map[string]bool{
 	"--search": true, "--no-alt-screen": true,
 }
 
-var utilityCommands = map[string]bool{
-	"login": true, "logout": true, "mcp": true, "plugin": true,
-	"remote-control": true, "app": true, "completion": true, "update": true,
-	"doctor": true, "sandbox": true, "apply": true, "a": true,
-	"features": true, "help": true,
-}
-
 // ps command= is flattened text, not an argv vector. This parser recognizes
-// only enough stable root syntax to avoid counting known utility processes and
-// to fail closed on a possible app-server. It never proves client transport.
+// only enough stable root syntax to fail closed on a possible app-server. It
+// never proves client transport or that positional text is really a command.
 func classifyProcessRole(fields []string) (processRole, []string) {
 	for n := 1; n < len(fields); n++ {
 		arg := fields[n]
@@ -667,11 +663,7 @@ func classifyProcessRole(fields []string) (processRole, []string) {
 			return processCandidate, nil
 		}
 		if rootOptionsWithValue[arg] {
-			if n+1 >= len(fields) {
-				return processUncertain, nil
-			}
-			n++
-			continue
+			return processUncertain, nil
 		}
 		if arg == "-i" || arg == "--image" {
 			return processUncertain, nil
@@ -682,12 +674,11 @@ func classifyProcessRole(fields []string) (processRole, []string) {
 		if rootBooleanOptions[arg] {
 			continue
 		}
-		if strings.HasPrefix(arg, "--") && strings.Contains(arg, "=") {
+		if strings.Contains(arg, "=") {
 			key, _, _ := strings.Cut(arg, "=")
 			if rootOptionsWithValue[key] {
-				continue
+				return processUncertain, nil
 			}
-			return processUncertain, nil
 		}
 		if strings.HasPrefix(arg, "-") {
 			return processUncertain, nil
@@ -695,16 +686,11 @@ func classifyProcessRole(fields []string) (processRole, []string) {
 		switch arg {
 		case "app-server":
 			args := fields[n+1:]
-			for _, candidate := range args {
-				if candidate == "daemon" || candidate == "proxy" || strings.HasPrefix(candidate, "generate-") {
-					return processIgnored, nil
-				}
+			if len(args) > 0 && (args[0] == "daemon" || args[0] == "proxy" || strings.HasPrefix(args[0], "generate-")) {
+				return processIgnored, nil
 			}
 			return processServer, args
 		default:
-			if utilityCommands[arg] {
-				return processIgnored, nil
-			}
 			return processCandidate, nil
 		}
 	}

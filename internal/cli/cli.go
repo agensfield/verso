@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/agensfield/verso/internal/accounts"
 	"github.com/agensfield/verso/internal/auth"
@@ -45,8 +46,10 @@ type response struct {
 	Active      string                 `json:"active_account_id,omitempty"`
 	Cached      bool                   `json:"cached,omitempty"`
 	Update      *updater.Result        `json:"update,omitempty"`
+	UpdateInfo  *updateMetadata        `json:"update_info,omitempty"`
 	Plan        *switcher.Plan         `json:"plan,omitempty"`
 	Quotas      map[string]quota.Entry `json:"quotas,omitempty"`
+	QuotaInfo   map[string]quotaWire   `json:"quota_observations,omitempty"`
 	Switch      *switcher.Result       `json:"switch_result,omitempty"`
 	Journal     *switcher.Checkpoint   `json:"unfinished_switch,omitempty"`
 	Snapshot    *herdr.Snapshot        `json:"herdr_snapshot,omitempty"`
@@ -57,7 +60,7 @@ type response struct {
 	Error       string                 `json:"error,omitempty"`
 	ErrorCode   string                 `json:"error_code,omitempty"`
 	Hint        string                 `json:"hint,omitempty"`
-	Accounts    []accounts.Account     `json:"accounts,omitempty"`
+	Accounts    []accounts.Account     `json:"accounts"`
 	Runtime     *codex.Observation     `json:"runtime,omitempty"`
 	Target      *accounts.Account      `json:"target,omitempty"`
 	VersionInfo *versionMetadata       `json:"version_info,omitempty"`
@@ -72,6 +75,15 @@ type versionMetadata struct {
 	InstallKind string `json:"install_kind"`
 }
 
+type updateMetadata struct {
+	Current     string         `json:"current"`
+	Latest      string         `json:"latest"`
+	Status      updater.Status `json:"status"`
+	InstallKind string         `json:"install_kind"`
+	Updated     bool           `json:"updated"`
+	Guidance    string         `json:"guidance,omitempty"`
+}
+
 type selectionMetadata struct {
 	Status string `json:"status"`
 }
@@ -81,6 +93,26 @@ type quotaMetadata struct {
 	Attempted int  `json:"attempted"`
 	Available int  `json:"available"`
 	Failed    int  `json:"failed"`
+}
+
+type quotaWire struct {
+	Primary       *windowWire `json:"primary"`
+	Secondary     *windowWire `json:"secondary"`
+	Plan          *string     `json:"plan"`
+	Exhausted     *bool       `json:"exhausted"`
+	ObservedAt    *time.Time  `json:"observed_at"`
+	CheckedAt     *time.Time  `json:"checked_at"`
+	AttemptedAt   *time.Time  `json:"attempted_at"`
+	Stale         bool        `json:"stale"`
+	LoginRequired bool        `json:"login_required"`
+	Warning       string      `json:"warning,omitempty"`
+}
+
+type windowWire struct {
+	UsedPercent    *float64   `json:"used_percent"`
+	WindowSeconds  *int64     `json:"window_seconds"`
+	ResetInSeconds *int64     `json:"reset_in_seconds"`
+	ResetsAt       *time.Time `json:"resets_at"`
 }
 
 type commandMetadata struct {
@@ -338,6 +370,9 @@ func contractText(contract *contractMetadata) string {
 }
 
 func (a *App) finish(r response, err error) int {
+	if r.Accounts == nil {
+		r.Accounts = []accounts.Account{}
+	}
 	r.Schema = "verso/v1"
 	r.OK = err == nil
 	if err != nil {

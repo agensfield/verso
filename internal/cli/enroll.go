@@ -45,6 +45,9 @@ func (a *App) add(ctx context.Context, args []string) int {
 		// The device code is deliberately shown only in this human-initiated flow,
 		// never in stored metadata, logs, JSON results, or errors.
 		_, e := fmt.Fprintf(a.Out, "Open %s and enter code %s\n", prompt.VerificationURL, prompt.UserCode)
+		if e == nil && !prompt.ExpiresAt.IsZero() {
+			_, e = fmt.Fprintf(a.Out, "This code expires at %s. Press Ctrl-C to cancel.\n", prompt.ExpiresAt.Local().Format("15:04 MST"))
+		}
 		return e
 	})
 	if err != nil {
@@ -59,6 +62,6 @@ func (a *App) add(ctx context.Context, args []string) int {
 		return a.finish(r, err)
 	}
 	r.Target = &account
-	r.Message = "Account saved. The selected Codex account has not changed."
+	r.Message = "Account saved. The selected Codex account has not changed. Run `verso list` to inspect saved accounts."
 	return a.finish(r, nil)
 }

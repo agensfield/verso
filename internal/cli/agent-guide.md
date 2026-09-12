@@ -31,18 +31,30 @@ may report unhealthy threads. Current-login import does not require conversation
 to be idle or healthy.
 
 JSON responses use `schema: "verso/v1"`, an `ok` flag, and an `error` on failure.
-Check both the exit status and `ok`. Do not treat missing fields as confirmed state.
+Failures also include a stable `error_code` and may include a safe `hint`. Check both
+the exit status and `ok`. Do not treat missing fields as confirmed state. Run
+`verso schema --json` for offline command, flag, and effect metadata. `--json`
+applies to the whole invocation, including argument failures and help.
+
+List results separate account inventory, selected-login observation, and quota
+observation. `accounts` is an empty array when none are saved. `selection.status`
+states whether selection was verified, unmatched, absent, unknown, or not inspected.
+`quota_observation.complete` can be false while `ok` remains true because saved
+account discovery succeeded independently of one or more quota requests.
 
 ## Save or inspect accounts when requested
 
 ```sh
 verso import personal --json
+verso alias personal home --json
 verso list personal --json
 verso list --cached --json
 verso remove old-account --json
 ```
 
 - `import` saves the current native login without activating another account.
+- `alias <account> <alias>` changes display metadata only. Use it to resolve
+  ambiguous emails; it does not alter native account identity or credentials.
 - `add [alias]` starts device authorization directly into Verso's store. It needs
   human participation and does not support `--json`. Start it only when requested;
   keep device codes out of logs, shared notes, and source files.
@@ -72,6 +84,14 @@ Synthetic test fixtures with fake runtimes are separate from operating real acco
 
 Do not add `--allow-exhausted` or `--allow-no-snapshot` automatically. The operator
 must choose those tradeoffs. No automatic account fallback or queued switch exists.
+
+Common safe failure handling:
+
+- `account_not_found`: refresh the saved inventory with `list --cached --json`.
+- `account_ambiguous`: use a distinct alias or exact saved ID, never guess.
+- `cancelled`: no approval is implied; let the operator retry when ready.
+- `recovery_required`: inspect `recovery --json` before another mutation.
+- `invalid_arguments`: follow the returned hint or command help.
 
 With a managed daemon, visible active turns block switching, including approval
 and input waits. Unknown or unreachable daemon state also blocks. Do not force

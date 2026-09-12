@@ -29,6 +29,7 @@ func (a *App) updateCommand(ctx context.Context, args []string, check bool) int 
 		result, err = updater.Update(ctx, options)
 	}
 	r.Update = &result
+	r.UpdateInfo = &updateMetadata{Current: result.Current, Latest: result.Latest, Status: result.Status, InstallKind: result.InstallKind, Updated: result.Updated, Guidance: result.Guidance}
 	if err == nil {
 		r.Message = fmt.Sprintf("Current: %s; latest: %s (%s).", result.Current, result.Latest, result.Status)
 		if result.Updated {

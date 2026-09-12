@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"time"
 
 	"github.com/agensfield/verso/internal/accounts"
 	application "github.com/agensfield/verso/internal/app"
@@ -98,7 +99,7 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 }
 
 func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
-	r := response{Command: "list", Cached: cached, Accounts: []accounts.Account{}, Quotas: map[string]quota.Entry{}, Selection: &selectionMetadata{Status: "not_inspected"}}
+	r := response{Command: "list", Cached: cached, Accounts: []accounts.Account{}, Quotas: map[string]quota.Entry{}, QuotaInfo: map[string]quotaWire{}, Selection: &selectionMetadata{Status: "not_inspected"}}
 	if len(args) > 1 {
 		return a.finish(r, errors.New("usage: verso list [account] [--cached]"))
 	}
@@ -157,6 +158,7 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 		}
 	}
 	r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, !cached)
+	r.QuotaInfo = quotaWires(r.Accounts, r.Quotas)
 	return a.finish(r, err)
 }
 
@@ -175,4 +177,48 @@ func summarizeQuotas(saved []accounts.Account, entries map[string]quota.Entry, a
 		}
 	}
 	return result
+}
+
+func quotaWires(saved []accounts.Account, entries map[string]quota.Entry) map[string]quotaWire {
+	result := make(map[string]quotaWire, len(saved))
+	for _, account := range saved {
+		entry := entries[account.ID]
+		wire := quotaWire{
+			Primary: windowToWire(nil), Secondary: windowToWire(nil), Plan: nil, Exhausted: nil,
+			ObservedAt: timeOrNil(time.Time{}), CheckedAt: timeOrNil(entry.CheckedAt), AttemptedAt: timeOrNil(entry.AttemptedAt),
+			Stale: entry.Stale, LoginRequired: entry.LoginRequired, Warning: entry.Warning,
+		}
+		if entry.Quota != nil {
+			wire.Primary = windowToWire(entry.Quota.Primary)
+			wire.Secondary = windowToWire(entry.Quota.Secondary)
+			wire.Plan = entry.Quota.Plan
+			wire.Exhausted = entry.Quota.Exhausted
+			wire.ObservedAt = timeOrNil(entry.Quota.ObservedAt)
+		}
+		result[account.ID] = wire
+	}
+	return result
+}
+
+func windowToWire(window *auth.Window) *windowWire {
+	if window == nil {
+		return nil
+	}
+	result := &windowWire{UsedPercent: window.UsedPercent, ResetsAt: window.ResetsAt}
+	if window.Window != nil {
+		seconds := int64((*window.Window) / time.Second)
+		result.WindowSeconds = &seconds
+	}
+	if window.ResetAfter != nil {
+		seconds := int64((*window.ResetAfter) / time.Second)
+		result.ResetInSeconds = &seconds
+	}
+	return result
+}
+
+func timeOrNil(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }

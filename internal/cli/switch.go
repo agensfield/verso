@@ -76,6 +76,9 @@ func (a *App) backend() (*application.Backend, error) {
 		}
 		return client.DeviceLogin(ctx, func(p auth.DevicePrompt) error {
 			_, err := fmt.Fprintf(a.Out, "Open %s and enter code %s\n", p.VerificationURL, p.UserCode)
+			if err == nil && !p.ExpiresAt.IsZero() {
+				_, err = fmt.Fprintf(a.Out, "This code expires at %s. Press Ctrl-C to cancel.\n", p.ExpiresAt.Local().Format("15:04 MST"))
+			}
 			return err
 		})
 	}

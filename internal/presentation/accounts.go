@@ -95,23 +95,37 @@ func writeAccount(b *strings.Builder, p palette, account accounts.Account, entry
 		prefix = fmt.Sprintf("%d  ", number)
 	}
 	var details []string
+	var plainDetails []string
 	if active {
 		details = append(details, p.ansi("36", "active"))
+		plainDetails = append(plainDetails, "active")
 	}
 	if entry.Quota != nil && entry.Quota.Plan != nil {
 		if plan := safeLabel(*entry.Quota.Plan); plan != "" {
-			details = append(details, p.quiet(truncateLabel(plan, 20)))
+			plan = truncateCells(plan, 20)
+			details = append(details, p.quiet(plan))
+			plainDetails = append(plainDetails, plan)
 		}
 	}
 	detailText := ""
 	if len(details) > 0 {
 		detailText = "  " + strings.Join(details, p.quiet(" · "))
 	}
-	nameBudget := max(8, options.Width-cellWidth(prefix)-cellWidth(stripANSI(detailText)))
+	detailsFit := cellWidth(prefix)+8+cellWidth(stripANSI(detailText)) <= options.Width
+	nameBudget := options.Width - cellWidth(prefix)
+	if detailsFit {
+		nameBudget -= cellWidth(stripANSI(detailText))
+	}
+	nameBudget = max(1, nameBudget)
 	b.WriteString(prefix)
 	b.WriteString(p.bold(truncateCells(Name(account), nameBudget)))
-	b.WriteString(detailText)
+	if detailsFit {
+		b.WriteString(detailText)
+	}
 	b.WriteByte('\n')
+	if !detailsFit && len(plainDetails) > 0 {
+		writeIndented(b, p, strings.Join(plainDetails, " · "), options.Width, false)
+	}
 
 	alias := safeLabel(account.Alias)
 	email := safeLabel(account.Email)
@@ -191,7 +205,7 @@ func writeWindowLine(b *strings.Builder, p palette, width int, line, reset strin
 	}
 	b.WriteString(line)
 	b.WriteByte('\n')
-	fmt.Fprintf(b, "    %s\n", p.quiet(strings.TrimPrefix(reset, " · ")))
+	writeIndented(b, p, strings.TrimPrefix(reset, " · "), width, true)
 }
 
 func quotaBar(p palette, remaining float64) string {

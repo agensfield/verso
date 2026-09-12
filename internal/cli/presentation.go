@@ -23,6 +23,11 @@ func (a *App) renderAccountCards(r response, numbered bool) error {
 }
 
 func (a *App) accountWidth() int {
+	if out, ok := a.Out.(*os.File); ok {
+		if width := terminalWidth(out.Fd()); width >= 20 && width <= 500 {
+			return width
+		}
+	}
 	for _, entry := range a.environment() {
 		key, value, found := strings.Cut(entry, "=")
 		if !found || key != "COLUMNS" {

@@ -256,6 +256,27 @@ func TestAccountCardsRenderPastAndFutureTimesHonestly(t *testing.T) {
 	}
 }
 
+func TestAccountCardsBudgetHeadingDetailsAndResetContinuations(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-7 * 24 * time.Hour)
+	plan := strings.Repeat("界", 20)
+	entry := quota.Entry{Quota: &auth.Quota{Plan: &plan, Primary: &auth.Window{UsedPercent: ptr(50.0), ResetsAt: &past}}}
+	var out bytes.Buffer
+	if err := WriteAccountCards(&out, []accounts.Account{{ID: "secret", Alias: strings.Repeat("界", 20)}}, map[string]quota.Entry{"secret": entry}, "secret", false, false, now, AccountOptions{Width: 20, Plain: true, Numbered: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if width := cellWidth(stripANSI(line)); width > 20 {
+			t.Errorf("line is %d cells: %q\n%s", width, line, out.String())
+		}
+	}
+	for _, want := range []string{"active", "50% left", "reset due"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q: %q", want, out.String())
+		}
+	}
+}
+
 type errorWriter struct{ err error }
 
 func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }

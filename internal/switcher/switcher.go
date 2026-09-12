@@ -37,6 +37,7 @@ type Request struct {
 type Plan struct {
 	Request
 	Inspection
+	Unfinished bool `json:"unfinished"`
 }
 
 // Checkpoint contains identities and phases only, never credentials.
@@ -86,11 +87,23 @@ type Backend interface {
 	Verify(context.Context, string, bool) error
 }
 
-type Engine struct{ Backend Backend }
+type Engine struct {
+	Backend    Backend
+	OnProgress func(string)
+}
+
+func (e Engine) progress(phase string) {
+	if e.OnProgress != nil {
+		e.OnProgress(phase)
+	}
+}
 
 func check(p Plan) error {
 	if p.Target == "" {
 		return errors.New("target account is required")
+	}
+	if p.Unfinished {
+		return ErrUnfinished
 	}
 	if !p.ActiveKnown || (p.Daemon != Running && p.Daemon != Stopped) {
 		return ErrUnknown
@@ -112,11 +125,17 @@ func check(p Plan) error {
 
 // Preview does not enroll, refresh, save credentials, snapshot or restart.
 func (e Engine) Preview(ctx context.Context, req Request) (Plan, error) {
-	state, err := e.Backend.Inspect(ctx, req.Target)
-	if err != nil {
-		return Plan{}, err
+	p := Plan{Request: req}
+	unfinished, unfinishedErr := e.Backend.Unfinished(ctx)
+	p.Unfinished = unfinished
+	state, inspectErr := e.Backend.Inspect(ctx, req.Target)
+	p.Inspection = state
+	if unfinishedErr != nil {
+		return p, unfinishedErr
 	}
-	p := Plan{Request: req, Inspection: state}
+	if inspectErr != nil {
+		return p, inspectErr
+	}
 	return p, check(p)
 }
 
@@ -131,13 +150,6 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 		return Result{}, err
 	}
 	defer release()
-	unfinished, err := e.Backend.Unfinished(ctx)
-	if err != nil {
-		return Result{}, err
-	}
-	if unfinished {
-		return Result{}, ErrUnfinished
-	}
 	p, err := e.Preview(ctx, req)
 	if err != nil {
 		// Expired cached quota may be repaired by target preparation, but never
@@ -149,6 +161,7 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 	if p.Active == req.Target {
 		return Result{Active: p.Active, ActiveKnown: true}, nil
 	}
+	e.progress("preparing")
 	if err := e.Backend.PrepareTarget(ctx, req.Target); err != nil {
 		return Result{Active: p.Active, ActiveKnown: true}, err
 	}
@@ -190,11 +203,13 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 		if err := write("stopping"); err != nil {
 			return out, err
 		}
+		e.progress("stopping")
 		if err := e.Backend.Stop(ctx); err != nil {
 			return out, fmt.Errorf("daemon stop could not be confirmed; credentials unchanged, recovery required: %w", err)
 		}
 	}
 	// From this point a stopped daemon may need recovery even before activation.
+	e.progress("saving")
 	if err := e.Backend.SaveActive(ctx, p.Active); err != nil {
 		return out, fmt.Errorf("cannot preserve outgoing credentials; recovery required: %w", err)
 	}
@@ -202,6 +217,7 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 		return out, err
 	}
 	out.Active, out.ActiveKnown = "", false
+	e.progress("activating")
 	if err := e.Backend.Activate(ctx, req.Target); err != nil {
 		return e.rollback(ctx, cp, out, fmt.Errorf("target activation failed: %w", err))
 	}
@@ -209,10 +225,12 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 		if err := write("starting"); err != nil {
 			return out, fmt.Errorf("target credentials installed but journal update failed; recovery required: %w", err)
 		}
+		e.progress("starting")
 		if err := e.Backend.Start(ctx); err != nil {
 			return e.rollback(ctx, cp, out, fmt.Errorf("target daemon failed to start: %w", err))
 		}
 	}
+	e.progress("verifying")
 	if err := e.Backend.Verify(ctx, req.Target, cp.HadDaemon); err != nil {
 		return e.rollback(ctx, cp, out, fmt.Errorf("target account verification failed: %w", err))
 	}
@@ -221,6 +239,7 @@ func (e Engine) Execute(ctx context.Context, req Request, approve func(Plan) err
 	if err := write("committed"); err != nil {
 		return out, fmt.Errorf("account switched and verified, but journal needs recovery: %w", err)
 	}
+	e.progress("committed")
 	if err := e.Backend.ClearCheckpoint(ctx); err != nil {
 		return out, fmt.Errorf("account switched and verified, but journal cleanup failed: %w", err)
 	}
@@ -237,6 +256,7 @@ func sameConditions(a, b Inspection) bool {
 func (e Engine) rollback(ctx context.Context, cp Checkpoint, out Result, cause error) (Result, error) {
 	out.RollbackAttempted = true
 	cp.Phase = "rolling_back"
+	e.progress("rolling_back")
 	if err := e.Backend.WriteCheckpoint(ctx, cp); err != nil {
 		return out, errors.Join(cause, fmt.Errorf("cannot journal rollback; human recovery required: %w", err))
 	}

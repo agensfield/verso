@@ -13,6 +13,7 @@ import (
 	"github.com/agensfield/verso/internal/accounts"
 	"github.com/agensfield/verso/internal/auth"
 	"github.com/agensfield/verso/internal/codex"
+	"github.com/agensfield/verso/internal/quota"
 )
 
 type fixtureResolver struct{}
@@ -265,6 +266,14 @@ func TestQuotaCommandWasRemoved(t *testing.T) {
 	}
 	if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
 		t.Fatal("removed command touched state")
+	}
+}
+
+func TestQuotaSummaryUsesActualAttemptCount(t *testing.T) {
+	saved := []accounts.Account{{ID: "one"}, {ID: "two"}}
+	result := summarizeQuotas(saved, map[string]quota.Entry{"one": {Quota: &auth.Quota{}}}, 1)
+	if result.Attempted != 1 || result.Available != 1 || result.Failed != 1 || result.Complete {
+		t.Fatalf("unexpected partial summary: %+v", result)
 	}
 }
 func TestSwitchCommandRejectsAgentBeforeInspection(t *testing.T) {

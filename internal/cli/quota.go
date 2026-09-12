@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"time"
 
 	"github.com/agensfield/verso/internal/accounts"
 	application "github.com/agensfield/verso/internal/app"
@@ -13,24 +14,29 @@ import (
 	"github.com/agensfield/verso/internal/selection"
 )
 
-func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force bool) (map[string]quota.Entry, string, error) {
+func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force bool) (map[string]quota.Entry, string, string, int, error) {
 	release, err := operation.Lock(a.StateDir)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "unknown", 0, err
 	}
 	defer release()
 	inspector, err := a.inspector()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "unknown", 0, err
 	}
 	observation, inspectErr := inspector.InspectSelection(ctx)
 	active := accounts.ActiveIdentity{}
+	selectionStatus := "unknown"
 	if inspectErr == nil && application.FileSelectionAllowed(observation) {
 		active = observation.SelectedFile
+		selectionStatus = "verified_unmatched"
+		if active.Known && active.UserID == "" && active.AccountID == "" {
+			selectionStatus = "no_login"
+		}
 	}
 	store, err := accounts.Open(filepath.Join(a.StateDir, "accounts"))
 	if err != nil {
-		return nil, "", err
+		return nil, "", selectionStatus, 0, err
 	}
 	client := a.network()
 	service := quota.Service{CheckSelection: func() error {
@@ -70,25 +76,32 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 	for _, account := range saved {
 		if active.Known && account.UserID == active.UserID && account.AccountID == active.AccountID {
 			activeID = account.ID
+			selectionStatus = "verified"
 		}
 	}
 	entries := make(map[string]quota.Entry, len(saved))
+	attempted := 0
 	// Sequential bounded requests suit the two-account alpha; no resident worker.
-	for _, account := range saved {
+	for index, account := range saved {
 		if err := ctx.Err(); err != nil {
-			return entries, activeID, err
+			return entries, activeID, selectionStatus, attempted, err
 		}
+		a.progress("Checking usage: %s (%d/%d)", accountChoiceName(account), index+1, len(saved))
+		attempted++
 		entry, err := service.Refresh(ctx, account.ID, force)
 		if err != nil {
-			return entries, activeID, err
+			return entries, activeID, selectionStatus, attempted, err
 		}
 		entries[account.ID] = entry
 	}
-	return entries, activeID, nil
+	if err := ctx.Err(); err != nil {
+		return entries, activeID, selectionStatus, attempted, err
+	}
+	return entries, activeID, selectionStatus, attempted, nil
 }
 
 func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
-	r := response{Command: "list", Cached: cached}
+	r := response{Command: "list", Cached: cached, Accounts: []accounts.Account{}, Quotas: map[string]quota.Entry{}, QuotaInfo: map[string]quotaWire{}, Selection: &selectionMetadata{Status: "not_inspected"}}
 	if len(args) > 1 {
 		return a.finish(r, errors.New("usage: verso list [account] [--cached]"))
 	}
@@ -106,12 +119,14 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 	if len(args) == 1 {
 		account, e := store.Find(args[0])
 		if e != nil {
+			r.Accounts = []accounts.Account{}
 			return a.finish(r, e)
 		}
 		r.Accounts = []accounts.Account{account}
 	}
 	if len(r.Accounts) == 0 {
-		r.Message = "No accounts saved."
+		r.Message = "No accounts saved. Import the current login with `verso import personal`, or add another with `verso add work`."
+		r.QuotaState = &quotaMetadata{Complete: true}
 		return a.finish(r, nil)
 	}
 	if cached {
@@ -124,10 +139,14 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 			r.Quotas[account.ID] = entry
 		}
 	} else {
-		r.Quotas, r.Active, err = a.fetchQuotas(ctx, r.Accounts, true)
+		var selectionStatus string
+		var attempted int
+		r.Quotas, r.Active, selectionStatus, attempted, err = a.fetchQuotas(ctx, r.Accounts, true)
+		r.Selection.Status = selectionStatus
 		if err != nil {
 			// The selection proof is no longer current, so do not render its badge.
 			r.Active = ""
+			r.Selection.Status = "unknown"
 		}
 		if err == nil {
 			// Inactive credential refresh can update list-safe account metadata.
@@ -141,6 +160,70 @@ func (a *App) listCommand(ctx context.Context, args []string, cached bool) int {
 				r.Accounts, err = store.List()
 			}
 		}
+		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, attempted)
 	}
+	if cached {
+		r.QuotaState = summarizeQuotas(r.Accounts, r.Quotas, 0)
+	}
+	r.QuotaInfo = quotaWires(r.Accounts, r.Quotas)
 	return a.finish(r, err)
+}
+
+func summarizeQuotas(saved []accounts.Account, entries map[string]quota.Entry, attempted int) *quotaMetadata {
+	result := &quotaMetadata{Complete: true}
+	result.Attempted = attempted
+	for _, account := range saved {
+		entry, found := entries[account.ID]
+		if found && entry.Quota != nil {
+			result.Available++
+		} else {
+			result.Failed++
+			result.Complete = false
+		}
+	}
+	return result
+}
+
+func quotaWires(saved []accounts.Account, entries map[string]quota.Entry) map[string]quotaWire {
+	result := make(map[string]quotaWire, len(saved))
+	for _, account := range saved {
+		entry := entries[account.ID]
+		wire := quotaWire{
+			Primary: windowToWire(nil), Secondary: windowToWire(nil), Plan: nil, Exhausted: nil,
+			ObservedAt: timeOrNil(time.Time{}), CheckedAt: timeOrNil(entry.CheckedAt), AttemptedAt: timeOrNil(entry.AttemptedAt),
+			Stale: entry.Stale, LoginRequired: entry.LoginRequired, Warning: entry.Warning,
+		}
+		if entry.Quota != nil {
+			wire.Primary = windowToWire(entry.Quota.Primary)
+			wire.Secondary = windowToWire(entry.Quota.Secondary)
+			wire.Plan = entry.Quota.Plan
+			wire.Exhausted = entry.Quota.Exhausted
+			wire.ObservedAt = timeOrNil(entry.Quota.ObservedAt)
+		}
+		result[account.ID] = wire
+	}
+	return result
+}
+
+func windowToWire(window *auth.Window) *windowWire {
+	if window == nil {
+		return nil
+	}
+	result := &windowWire{UsedPercent: window.UsedPercent, ResetsAt: window.ResetsAt}
+	if window.Window != nil {
+		seconds := int64((*window.Window) / time.Second)
+		result.WindowSeconds = &seconds
+	}
+	if window.ResetAfter != nil {
+		seconds := int64((*window.ResetAfter) / time.Second)
+		result.ResetInSeconds = &seconds
+	}
+	return result
+}
+
+func timeOrNil(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }

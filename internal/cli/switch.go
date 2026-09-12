@@ -1,10 +1,10 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -75,6 +75,9 @@ func (a *App) backend() (*application.Backend, error) {
 		}
 		return client.DeviceLogin(ctx, func(p auth.DevicePrompt) error {
 			_, err := fmt.Fprintf(a.Out, "Open %s and enter code %s\n", p.VerificationURL, p.UserCode)
+			if err == nil && !p.ExpiresAt.IsZero() {
+				_, err = fmt.Fprintf(a.Out, "This code expires at %s. Press Ctrl-C to cancel.\n", p.ExpiresAt.Local().Format("15:04 MST"))
+			}
 			return err
 		})
 	}
@@ -121,7 +124,7 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		if len(saved) == 0 {
 			return a.finish(r, errors.New("no saved accounts; run verso add first"))
 		}
-		entries, active, err := a.fetchQuotas(ctx, saved, false)
+		entries, active, _, _, err := a.fetchQuotas(ctx, saved, false)
 		if err != nil {
 			return a.finish(r, err)
 		}
@@ -129,21 +132,15 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		if err != nil {
 			return a.finish(r, err)
 		}
-		if err := a.renderAccounts(response{Accounts: saved, Quotas: entries, Active: active}); err != nil {
+		if _, err := fmt.Fprintln(a.Out, a.humanHeading("Choose account")); err != nil {
 			return a.finish(r, err)
 		}
-		_, _ = fmt.Fprintln(a.Out, a.humanHeading("Choose account"))
-		for n, account := range saved {
-			_, _ = fmt.Fprintf(a.Out, "  %d  %s\n", n+1, accountChoiceName(account))
+		if err := a.renderAccountCards(response{Accounts: saved, Quotas: entries, Active: active}, true); err != nil {
+			return a.finish(r, err)
 		}
-		_, _ = fmt.Fprint(a.Out, "Account number (empty cancels): ")
-		scanner := bufio.NewScanner(a.In)
-		if !scanner.Scan() {
-			return a.finish(r, errors.New("cancelled"))
-		}
-		n, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
-		if err != nil || n < 1 || n > len(saved) {
-			return a.finish(r, errors.New("cancelled or invalid account number"))
+		n, err := readAccountNumber(ctx, a.In, a.Out, len(saved))
+		if err != nil {
+			return a.finish(r, err)
 		}
 		query = saved[n-1].ID
 	}
@@ -181,4 +178,70 @@ func (a *App) switchAccount(ctx context.Context, args []string, allowExhausted, 
 		}
 	}
 	return a.finish(r, err)
+}
+
+func readAccountNumber(ctx context.Context, in io.Reader, out io.Writer, count int) (int, error) {
+	for {
+		if _, err := fmt.Fprint(out, "Account number (Enter cancels): "); err != nil {
+			return 0, err
+		}
+		line, err := readLine(ctx, in, 4096)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return 0, errors.New("cancelled; no switch performed")
+			}
+			return 0, err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return 0, errors.New("cancelled; no switch performed")
+		}
+		n, parseErr := strconv.Atoi(line)
+		if parseErr == nil && n >= 1 && n <= count {
+			return n, nil
+		}
+		if _, err := fmt.Fprintf(out, "Choose a number from 1 to %d, or press Enter to cancel.\n", count); err != nil {
+			return 0, err
+		}
+	}
+}
+
+type lineResult struct {
+	line string
+	err  error
+}
+
+// readLine reads no farther than one line, so a completed picker cannot consume
+// bytes intended for the later confirmation prompt.
+func readLine(ctx context.Context, in io.Reader, limit int) (string, error) {
+	result := make(chan lineResult, 1)
+	go func() {
+		var b strings.Builder
+		one := make([]byte, 1)
+		for b.Len() < limit {
+			n, err := in.Read(one)
+			if n == 1 {
+				if one[0] == '\n' {
+					result <- lineResult{line: b.String()}
+					return
+				}
+				b.WriteByte(one[0])
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) && b.Len() > 0 {
+					result <- lineResult{line: b.String()}
+				} else {
+					result <- lineResult{err: err}
+				}
+				return
+			}
+		}
+		result <- lineResult{err: errors.New("input line is too long")}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case value := <-result:
+		return value.line, value.err
+	}
 }

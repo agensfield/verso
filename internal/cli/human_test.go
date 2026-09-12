@@ -3,8 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentSwitchGuardAndNoPipedApproval(t *testing.T) {
@@ -18,6 +21,43 @@ func TestAgentSwitchGuardAndNoPipedApproval(t *testing.T) {
 		if err := a.requireHuman(); err == nil || !strings.Contains(err.Error(), "run this switch directly") {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestAccountNumberRetriesAndCancelsWithContext(t *testing.T) {
+	var out bytes.Buffer
+	n, err := readAccountNumber(context.Background(), strings.NewReader("9\n2\n"), &out, 2)
+	if err != nil || n != 2 || !strings.Contains(out.String(), "Choose a number from 1 to 2") {
+		t.Fatalf("selection = %d, %v; output %q", n, err, out.String())
+	}
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := readAccountNumber(ctx, reader, io.Discard, 2)
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("account picker ignored cancellation")
+	}
+}
+
+func TestAccountNumberLeavesConfirmationInputUnread(t *testing.T) {
+	in := strings.NewReader("1\ny\n")
+	if n, err := readAccountNumber(context.Background(), in, io.Discard, 2); err != nil || n != 1 {
+		t.Fatalf("selection = %d, %v", n, err)
+	}
+	if err := confirm(context.Background(), in, io.Discard, "Switch?"); err != nil {
+		t.Fatalf("picker consumed confirmation input: %v", err)
 	}
 }
 func TestConfirmationNeverDefaultsToApproval(t *testing.T) {

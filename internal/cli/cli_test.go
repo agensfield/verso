@@ -13,6 +13,7 @@ import (
 	"github.com/agensfield/verso/internal/accounts"
 	"github.com/agensfield/verso/internal/codex"
 	"github.com/agensfield/verso/internal/switcher"
+	"github.com/agensfield/verso/internal/updater"
 )
 
 func appFixture(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
@@ -168,6 +169,100 @@ func TestInvalidCommandAndFlagsFail(t *testing.T) {
 		a, _, _ := appFixture(t)
 		if code := a.Run(context.Background(), args); code == 0 {
 			t.Fatal(args)
+		}
+	}
+}
+
+func TestCommandFlagsAreRejectedBeforeEffects(t *testing.T) {
+	for _, args := range [][]string{
+		{"remove", "missing", "--check=false"},
+		{"import", "work", "--cached=false"},
+		{"add", "work", "--check"},
+		{"update", "--cached"},
+		{"status", "--allow-no-snapshot=false"},
+	} {
+		a, out, _ := appFixture(t)
+		a.UpdateAction = func(context.Context, bool) (updater.Result, error) {
+			t.Fatal("invalid flag dispatched update")
+			return updater.Result{}, nil
+		}
+		if code := a.Run(context.Background(), append(args, "--json")); code == 0 {
+			t.Fatalf("accepted flags: %v", args)
+		}
+		var result response
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil || result.ErrorCode != "invalid_arguments" {
+			t.Fatalf("unexpected result for %v: %s", args, out.String())
+		}
+		if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
+			t.Fatalf("invalid invocation touched state: %v", args)
+		}
+	}
+}
+
+func TestJSONIntentSurvivesParseAndHelp(t *testing.T) {
+	for _, args := range [][]string{
+		{"--json", "--bogus"},
+		{"list", "--cached=nah", "--json"},
+		{"--json=false", "list", "--cached=nah", "--json"},
+		{"--json", "--state-dir"},
+		{"--json"},
+		{"help", "list", "--json"},
+		{"list", "--help", "--json"},
+	} {
+		a, out, errOut := appFixture(t)
+		a.Run(context.Background(), args)
+		var result response
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Errorf("%v did not return JSON: stdout=%q stderr=%q", args, out.String(), errOut.String())
+		}
+		if errOut.Len() != 0 {
+			t.Errorf("%v wrote JSON error to stderr: %q", args, errOut.String())
+		}
+	}
+
+	a, out, _ := appFixture(t)
+	a.Run(context.Background(), []string{"--json", "list", "--cached=nah", "--json=false"})
+	if out.Len() != 0 {
+		t.Fatalf("final --json=false did not select human output: %q", out.String())
+	}
+
+	// A token consumed as a string flag value is not output intent.
+	a, _, errOut := appFixture(t)
+	a.Run(context.Background(), []string{"--state-dir", "--json", "--bogus"})
+	if !strings.Contains(errOut.String(), "verso:") {
+		t.Fatalf("consumed --json incorrectly enabled JSON: %q", errOut.String())
+	}
+}
+
+func TestUnknownCommandDiagnosticsDoNotEchoTerminalControls(t *testing.T) {
+	a, _, errOut := appFixture(t)
+	command := "unknown\x1b[2J"
+	if code := a.Run(context.Background(), []string{command, "--check"}); code == 0 {
+		t.Fatal("unknown command succeeded")
+	}
+	if strings.Contains(errOut.String(), command) || strings.Contains(errOut.String(), "\x1b") {
+		t.Fatalf("unsafe command reached diagnostic: %q", errOut.String())
+	}
+}
+
+func TestOfflineSchemaAndTypedVersionMetadata(t *testing.T) {
+	for _, args := range [][]string{{"schema", "--json"}, {"version", "--json"}, {"--version", "--json"}, {"--skill", "--json"}} {
+		a, out, _ := appFixture(t)
+		if code := a.Run(context.Background(), args); code != 0 {
+			t.Fatalf("%v exited %d: %s", args, code, out.String())
+		}
+		var result response
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil || !result.OK {
+			t.Fatalf("%v: %s", args, out.String())
+		}
+		if result.Command == "version" && (result.VersionInfo == nil || result.VersionInfo.Version != "test") {
+			t.Fatalf("missing version metadata: %s", out.String())
+		}
+		if (result.Command == "schema" || result.Command == "skill") && (result.Contract == nil || len(result.Contract.Commands) == 0) {
+			t.Fatalf("missing contract metadata: %s", out.String())
+		}
+		if _, err := os.Stat(a.StateDir); !os.IsNotExist(err) {
+			t.Fatalf("offline command touched state: %v", args)
 		}
 	}
 }

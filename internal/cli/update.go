@@ -16,6 +16,11 @@ func (a *App) updateCommand(ctx context.Context, args []string, check bool) int 
 	options := updater.Options{CurrentVersion: a.Version}
 	var result updater.Result
 	var err error
+	if check {
+		a.progress("Checking for updates...")
+	} else {
+		a.progress("Checking and installing the latest update...")
+	}
 	if a.UpdateAction != nil {
 		result, err = a.UpdateAction(ctx, check)
 	} else if check {

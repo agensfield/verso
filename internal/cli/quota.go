@@ -74,15 +74,19 @@ func (a *App) fetchQuotas(ctx context.Context, saved []accounts.Account, force b
 	}
 	entries := make(map[string]quota.Entry, len(saved))
 	// Sequential bounded requests suit the two-account alpha; no resident worker.
-	for _, account := range saved {
+	for index, account := range saved {
 		if err := ctx.Err(); err != nil {
 			return entries, activeID, err
 		}
+		a.progress("Checking usage: %s (%d/%d)", accountChoiceName(account), index+1, len(saved))
 		entry, err := service.Refresh(ctx, account.ID, force)
 		if err != nil {
 			return entries, activeID, err
 		}
 		entries[account.ID] = entry
+	}
+	if err := ctx.Err(); err != nil {
+		return entries, activeID, err
 	}
 	return entries, activeID, nil
 }

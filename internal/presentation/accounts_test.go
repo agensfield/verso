@@ -219,6 +219,43 @@ func TestWriteAccountsDoesNotRepeatEmailAlias(t *testing.T) {
 	}
 }
 
+func TestAccountCardsAdaptToNarrowAndPlainTerminals(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(2 * time.Hour)
+	entry := quota.Entry{
+		Quota:   &auth.Quota{Primary: &auth.Window{UsedPercent: ptr(25.0), ResetsAt: &reset}},
+		Warning: "usage refresh failed; cached observation retained",
+	}
+	var out bytes.Buffer
+	err := WriteAccountCards(&out, []accounts.Account{{ID: "secret", Alias: strings.Repeat("界", 30), Email: "wide@example.test"}}, map[string]quota.Entry{"secret": entry}, "secret", false, false, now, AccountOptions{Width: 40, Plain: true, Numbered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, "1  ") || strings.ContainsAny(got, "▰▱") || !strings.Contains(got, "resets Sat 14:00") || !strings.Contains(got, "warning:") {
+		t.Fatalf("narrow plain card lost semantics: %q", got)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+		if width := cellWidth(stripANSI(line)); width > 40 {
+			t.Errorf("line is %d cells: %q", width, line)
+		}
+	}
+}
+
+func TestAccountCardsRenderPastAndFutureTimesHonestly(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-7 * 24 * time.Hour)
+	entry := quota.Entry{Quota: &auth.Quota{Primary: &auth.Window{UsedPercent: ptr(50.0), ResetsAt: &past}}, CheckedAt: now.Add(time.Minute), Stale: true}
+	var out bytes.Buffer
+	if err := WriteAccounts(&out, []accounts.Account{{ID: "secret", Alias: "work"}}, map[string]quota.Entry{"secret": entry}, "", true, false, now); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "reset due Sep 5 12:00") || !strings.Contains(got, "checked in the future") || strings.Contains(got, "just now") {
+		t.Fatalf("dishonest time labels: %q", got)
+	}
+}
+
 type errorWriter struct{ err error }
 
 func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }

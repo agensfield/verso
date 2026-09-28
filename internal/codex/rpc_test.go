@@ -94,7 +94,7 @@ func TestRPCDoesNotEchoServerSecrets(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
-func TestRPCRefusesNonSocketAndSymlink(t *testing.T) {
+func TestRPCSocketSymlink(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(f, []byte("private"), 0600); err != nil {
 		t.Fatal(err)
@@ -107,9 +107,11 @@ func TestRPCRefusesNonSocketAndSymlink(t *testing.T) {
 	if err := os.Symlink(socket, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DialRPC(context.Background(), link, "test"); err == nil {
-		t.Fatal("accepted symlink")
+	conn, err := DialRPC(context.Background(), link, "test")
+	if err != nil {
+		t.Fatal(err)
 	}
+	_ = conn.Close()
 	if err := os.Chmod(socket, 0666); err != nil {
 		t.Fatal(err)
 	}

@@ -44,6 +44,11 @@ func managedPreferencesPresent(ctx context.Context, run CommandRunner) (bool, er
 }
 
 func (i Inspector) ownsSocket(ctx context.Context, pid int, socket string) (bool, error) {
+	resolved, err := resolveManagedSocket(socket)
+	if err != nil {
+		return false, err
+	}
+	paths := map[string]bool{socket: true, resolved: true}
 	raw, err := i.command(ctx, "/usr/sbin/lsof", "-n", "-a", "-p", strconv.Itoa(pid), "-U", "-Fpn")
 	if err != nil {
 		return false, err
@@ -53,7 +58,7 @@ func (i Inspector) ownsSocket(ctx context.Context, pid int, socket string) (bool
 		if strings.HasPrefix(line, "p") {
 			matchingPID = line == "p"+strconv.Itoa(pid)
 		}
-		if matchingPID && line == "n"+socket {
+		if matchingPID && strings.HasPrefix(line, "n") && paths[strings.TrimPrefix(line, "n")] {
 			return true, nil
 		}
 	}

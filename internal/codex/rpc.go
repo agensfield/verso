@@ -38,7 +38,11 @@ type rpcError struct {
 // DialRPC connects only to an explicitly selected, same-user private Unix socket.
 // No TCP fallback, ambient proxy, daemon startup or account refresh occurs.
 func DialRPC(ctx context.Context, socket, version string) (*RPC, error) {
-	info, err := os.Lstat(socket)
+	resolved, err := resolveManagedSocket(socket)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Codex socket: %w", err)
+	}
+	info, err := os.Stat(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Codex socket: %w", err)
 	}

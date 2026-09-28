@@ -1,3 +1,17 @@
+# Verso v0.1.0-alpha.7
+
+Compatibility patch for Codex 0.157 managed daemons.
+
+- Follow Codex's rotated managed-daemon socket symlink while keeping the stable
+  control directory as the trust boundary.
+- Restore managed-daemon inspection, credential-mode proof, quota refresh, and
+  switch safety checks on current macOS Codex installations.
+- Keep RPC validation and dialing safe for the stable socket path.
+
+Validation includes synthetic socket-rotation coverage, race tests, vet, and a
+read-only live status check against Codex 0.157.0. No account switch or daemon
+restart was performed.
+
 # Verso v0.1.0-alpha.6
 
 Early public alpha of the Codex account switcher.

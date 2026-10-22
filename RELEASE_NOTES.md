@@ -1,3 +1,9 @@
+# Verso v0.1.0-alpha.8
+
+Rebuild with Go 1.26.10 to reject distrusted certificate intermediates in TLS verification. Account switching, state and command behavior are unchanged.
+
+Validation includes race tests, vet and isolated CLI/PTY smoke flows. No live account switch or Codex restart is part of this release.
+
 # Verso v0.1.0-alpha.7
 
 Compatibility patch for Codex 0.157 managed daemons.
